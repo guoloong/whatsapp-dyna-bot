@@ -205,30 +205,139 @@ function jaccardSimilarity(str1, str2) {
     return intersection.size / union.size;
 }
 
+// ------------------- LLM-based Intent Detection ---------------------------
+async function detectIntentWithLLM(userMessage, apiKey) {
+    console.log(`🤖 Asking DeepSeek to detect intent for: "${userMessage}"`);
+    if (!apiKey) {
+        console.warn('⚠️ No API key for intent detection – falling back to regex');
+        return null;
+    }
+
+    const prompt = `Analyze this user query about health products and determine:
+1. The intent category (choose one: shipping, returns, payment, price, dosage, benefits, ingredients, suitability, retail_outlets, general_inquiry)
+2. The product name mentioned (if any, otherwise null)
+
+Return ONLY a JSON object with this exact format:
+{"intent": "category_name", "product": "Product Name or null"}
+
+Do not include any other text, explanations, or markdown formatting.
+
+User query: "${userMessage}"
+Response:`;
+
+    try {
+        const response = await axios.post(
+            'https://api.deepseek.com/v1/chat/completions',
+            {
+                model: 'deepseek-chat',
+                messages: [
+                    { role: 'system', content: 'You are an intent classification tool. Respond only with valid JSON.' },
+                    { role: 'user', content: prompt }
+                ],
+                temperature: 0,
+                max_tokens: 100
+            },
+            {
+                headers: { 'Authorization': `Bearer ${apiKey}` },
+                timeout: 10000
+            }
+        );
+
+        const content = response.data.choices[0].message.content.trim();
+        console.log(`🔑 DeepSeek intent detection: "${content}"`);
+
+        // Parse JSON response
+        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            const result = JSON.parse(jsonMatch[0]);
+            if (result.intent && typeof result.intent === 'string') {
+                return {
+                    intent: result.intent.toLowerCase(),
+                    product: result.product || null
+                };
+            }
+        }
+        console.log('⚠️ Invalid JSON from LLM – falling back to regex');
+        return null;
+    } catch (err) {
+        console.error('❌ Intent detection failed:', err.message);
+        return null;
+    }
+}
+
+// Regex-based intent detection (fallback)
+function detectIntentWithRegex(userMessage) {
+    const lowerMsg = userMessage.toLowerCase();
+    
+    // General topics
+    if (/\b(shipping|delivery|ship)\b/.test(lowerMsg)) {
+        return { intent: 'shipping', product: null };
+    }
+    if (/\b(return|refund|exchange)\b/.test(lowerMsg)) {
+        return { intent: 'returns', product: null };
+    }
+    if (/\b(payment|pay|card|visa|mastercard|bank transfer|paypal)\b/.test(lowerMsg)) {
+        return { intent: 'payment', product: null };
+    }
+
+    // Product-specific intents - detect product first
+    const kb = getKnowledge();
+    const productNames = Object.keys(kb.products);
+    const matchedProduct = findLastProductName(userMessage, productNames);
+
+    if (matchedProduct) {
+        if (/\b(price|cost|how much|money)\b/.test(lowerMsg)) {
+            return { intent: 'price', product: matchedProduct };
+        }
+        if (/\b(dosage|how (much|many)|take|consume|before|after).{0,15}\b(meal|food|eat)\b/i.test(lowerMsg)) {
+            return { intent: 'dosage', product: matchedProduct };
+        }
+        if (/\b(benefits?|good for|does it|help|summary)\b/.test(lowerMsg)) {
+            return { intent: 'benefits', product: matchedProduct };
+        }
+        if (/\b(ingredients?|contains?|made of|formulation)\b/.test(lowerMsg)) {
+            return { intent: 'ingredients', product: matchedProduct };
+        }
+        if (/\b(suitable|who can|who cannot|women|men|children|adult|pregnant|nursing)\b/.test(lowerMsg)) {
+            return { intent: 'suitability', product: matchedProduct };
+        }
+        if (/\b(where to buy|retail|outlets|store|pharmacy|guardian|watsons)\b/.test(lowerMsg)) {
+            return { intent: 'retail_outlets', product: matchedProduct };
+        }
+    }
+
+    return { intent: 'general_inquiry', product: matchedProduct };
+}
+
 // ------------------- Direct knowledge lookup ---------------------------
-function quickKnowledgeLookup(userMessage) {
+async function quickKnowledgeLookup(userMessage, apiKey = null) {
     console.log(`📚 === DIRECT LOOKUP ===`);
     const kb = getKnowledge();
     const lowerMsg = userMessage.toLowerCase();
     const productNames = Object.keys(kb.products);
 
-    // General topics
-    if (/\b(shipping|delivery|ship)\b/.test(lowerMsg)) {
-        console.log('📚 ✓ General: shipping');
-        return kb.general?.shipping || null;
-    }
-    if (/\b(return|refund|exchange)\b/.test(lowerMsg)) {
-        console.log('📚 ✓ General: returns');
-        return kb.general?.returns || null;
-    }
-    if (/\b(payment|pay|card|visa|mastercard|bank transfer|paypal)\b/.test(lowerMsg)) {
-        console.log('📚 ✓ General: payment');
-        return kb.general?.payment || null;
+    // Try LLM-based intent detection first
+    let intentResult = await detectIntentWithLLM(userMessage, apiKey);
+    
+    // Fallback to regex if LLM fails or returns null
+    if (!intentResult) {
+        intentResult = detectIntentWithRegex(userMessage);
+        console.log(`📚 Using regex intent detection: ${intentResult.intent}, product: ${intentResult.product}`);
+    } else {
+        console.log(`📚 Using LLM intent detection: ${intentResult.intent}, product: ${intentResult.product}`);
     }
 
-    // Product detection
-    const productsFound = findAllProductNames(userMessage, productNames);
-    const matchedProduct = productsFound.length > 0 ? findLastProductName(userMessage, productNames) : null;
+    const { intent, product: llmProduct } = intentResult;
+
+    // Handle general topics (no product needed)
+    if (['shipping', 'returns', 'payment'].includes(intent)) {
+        console.log(`📚 ✓ General: ${intent}`);
+        return kb.general?.[intent] || null;
+    }
+
+    // Use LLM-detected product if available, otherwise fall back to regex detection
+    const matchedProduct = llmProduct || findLastProductName(userMessage, productNames);
+    
     if (!matchedProduct) {
         console.log('📚 ✗ No known product detected');
         return null;
@@ -240,7 +349,7 @@ function quickKnowledgeLookup(userMessage) {
 
     // --- Direct field answers (new structured fields) ---
     // Price
-    if (/\b(price|cost|how much|money)\b/.test(lowerMsg)) {
+    if (intent === 'price' || /\b(price|cost|how much|money)\b/.test(lowerMsg)) {
         console.log('📚 Checking price...');
         if (typeof product.price === 'object') {
             const sg = product.price.singapore;
@@ -255,7 +364,7 @@ function quickKnowledgeLookup(userMessage) {
     }
 
     // Dosage / how to take / before/after meal
-    if (/\b(dosage|how (much|many)|take|consume|before|after).{0,15}\b(meal|food|eat)\b/i.test(lowerMsg)) {
+    if (intent === 'dosage' || /\b(dosage|how (much|many)|take|consume|before|after).{0,15}\b(meal|food|eat)\b/i.test(lowerMsg)) {
         console.log('📚 Checking dosage/meal timing...');
         if (typeof product.dosage === 'object') {
             const parts = Object.entries(product.dosage)
@@ -271,7 +380,7 @@ function quickKnowledgeLookup(userMessage) {
     }
 
     // Benefits
-    if (/\b(benefits?|good for|does it|help|summary)\b/.test(lowerMsg)) {
+    if (intent === 'benefits' || /\b(benefits?|good for|does it|help|summary)\b/.test(lowerMsg)) {
         console.log('📚 Checking benefits...');
         if (Array.isArray(product.benefits) && product.benefits.length) {
             return `Benefits of ${matchedProduct}: ${product.benefits.join(', ')}.`;
@@ -282,7 +391,7 @@ function quickKnowledgeLookup(userMessage) {
     }
 
     // Ingredients
-    if (/\b(ingredients?|contains?|made of|formulation)\b/.test(lowerMsg)) {
+    if (intent === 'ingredients' || /\b(ingredients?|contains?|made of|formulation)\b/.test(lowerMsg)) {
         console.log('📚 Checking ingredients...');
         if (Array.isArray(product.ingredients) && product.ingredients.length) {
             return `${matchedProduct} contains: ${product.ingredients.join(', ')}.`;
@@ -293,7 +402,7 @@ function quickKnowledgeLookup(userMessage) {
     }
 
     // Suitability (who can/cannot consume)
-    if (/\b(suitable|who can|who cannot|women|men|children|adult|pregnant|nursing)\b/.test(lowerMsg)) {
+    if (intent === 'suitability' || /\b(suitable|who can|who cannot|women|men|children|adult|pregnant|nursing)\b/.test(lowerMsg)) {
         console.log('📚 Checking suitability...');
         let answer = '';
         if (product.who_can_consume) answer += `Suitable for: ${product.who_can_consume}. `;
@@ -312,7 +421,7 @@ function quickKnowledgeLookup(userMessage) {
     }
 
     // Retail outlets
-    if (/\b(where to buy|retail|outlets|store|pharmacy|guardian|watsons)\b/.test(lowerMsg)) {
+    if (intent === 'retail_outlets' || /\b(where to buy|retail|outlets|store|pharmacy|guardian|watsons)\b/.test(lowerMsg)) {
         console.log('📚 Checking retail outlets...');
         if (Array.isArray(product.retail_outlets) && product.retail_outlets.length) {
             return `${matchedProduct} available at: ${product.retail_outlets.join(', ')}.`;
@@ -595,7 +704,7 @@ async function generateResponse(userMessage, _, apiKey, history = []) {
 
     // 1. Direct knowledge lookup (TIER 1)
     console.log(`\n📚 [TIER 1] Checking direct knowledge base...`);
-    const directAnswer = quickKnowledgeLookup(userMessage);
+    const directAnswer = await quickKnowledgeLookup(userMessage, apiKey);
     if (directAnswer) {
         console.log(`✅✅ [TIER 1] SUCCESS - Found direct answer`);
         console.log(`   Answer preview: "${directAnswer.substring(0, 100)}..."`);
@@ -820,4 +929,4 @@ async function generateResponse(userMessage, _, apiKey, history = []) {
     return { text: reply || "I'm having trouble responding right now.", imageUrl, productName: imageProduct };
 }
 
-module.exports = { generateResponse };
+module.exports = { generateResponse, quickKnowledgeLookup, detectIntentWithLLM, detectIntentWithRegex };

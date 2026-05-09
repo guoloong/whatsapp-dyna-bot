@@ -1,31 +1,33 @@
-# Environment variables
-.env
-.env.local
-.env.*.local
-
-# Session data (WhatsApp authentication - contains sensitive tokens)
-session-data/
-.WWebJS/
-
-# User data (privacy sensitive - never commit!)
-conversations.json
-contact_cache.json
-human_sessions.json
-
+```
 # Dependencies
 node_modules/
 
-# Logs
+# Environment
+.env
+.env.local
+*.env.*
+
+# Logs and temp files
 *.log
-npm-debug.log*
+*.tmp
 
-# OS files
-.DS_Store
-Thumbs.db
-
-# IDE
+# Editors
 .vscode/
 .idea/
 
-# Keep alive logs
-keep_alive.log
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Build outputs
+dist/
+build/
+*.min.js
+*.bundle.js
+
+# OS generated files
+.DS_Store
+Thumbs.db
+```
