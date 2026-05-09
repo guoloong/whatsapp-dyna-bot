@@ -3,6 +3,42 @@ const axios = require('axios');
 const { getKnowledge } = require('./knowledgeLoader');
 const { getSupplementaryInfo } = require('../utils/brochures');
 const { searchWebsite, fetchProductPageAndLinks } = require('../config/botConfig');
+const { isStoreQuery, isStoreQueryWithLLM, findStores, fetchProducts, clearPendingProduct, trackMentionedProduct } = require('./storeLocator');
+
+// Product slug normalization helper
+const PRODUCT_SLUG_MAP = {
+    'BioNatto Plus': 'bionatto',
+    'Men Guard': 'men-guard',
+    'Men Guard Capsule': 'men-guard',
+    'Ashislim': 'ashislim',
+    'Black Elderberry Juice': 'black-elderberry-juice',
+    'Elderola': 'elderola',
+    'Glucopal': 'glucopal',
+    'Hairegain': 'hairegain',
+    'HP-Floragut': 'hp-floragut',
+    'Liveprotein': 'liveprotein',
+    'Marinecal Plus': 'marinecal-plus',
+    'Nustem': 'nustem',
+    'Optiberries': 'optiberries',
+    'Optivue': 'optivue',
+    'Organic Ashitaba': 'organic-ashitaba',
+    'Super Bio Organic': 'super-bio-organic',
+    'Tibetan Seaberry': 'tibetan-seaberry',
+    'Tricollagen': 'tricollagen',
+    'Uri Comfort': 'uri-comfort',
+    'Vitamune CDZ': 'vitamune-cdz',
+    'Riflex 360': 'riflex-360'
+};
+
+function getProductSlug(productName) {
+    const mapped = PRODUCT_SLUG_MAP[productName];
+    if (mapped) return mapped;
+    // Smart stripping
+    return productName.toLowerCase()
+        .replace(/\s*(plus|capsule|capsules|tablet|softgel)\s*/gi, '')
+        .replace(/\s+/g, '-')
+        .replace(/[^a-z0-9\-]/g, '');
+}
 
 // ------------------- DeepSeek keyword extraction -----------------------
 async function extractKeywordsWithDeepSeek(userMessage, apiKey) {
@@ -417,7 +453,20 @@ function buildKnowledgePrompt(detectedProduct = null) {
         .replace(/\{payment\}/g, payment)
         .replace(/\{returns\}/g, returns);
 
-    prompt += `\n${guidelinesRaw}`;
+    // Add store locator guidelines
+    const storeLocatorGuidelines = `STORE LOCATOR GUIDELINES:
+When users ask about where to buy products or store locations:
+1. ALWAYS ask for their location/area first if they don't provide one
+2. Accept locations in various formats: "near X", "in X", "I'm in X", "near X airport"
+3. Support common Malaysia/Singapore areas: KL, PJ, Subang Jaya, Shah Alam, Penang, Johor, Singapore, etc.
+4. Once location is provided, the system will find nearest stores with addresses and phone numbers
+5. Always confirm with user to ask if they want to find stores for a specific product
+
+Example responses for location requests:
+- "To find the nearest store, please share your location. Example: 'near Subang Jaya' or 'I'm in Shah Alam'"
+- "I can help you find nearby stores! Please tell me your area."`;
+
+    prompt += `\n${guidelinesRaw}\n${storeLocatorGuidelines}`;
     return prompt;
 }
 
@@ -474,6 +523,76 @@ async function generateResponse(userMessage, _, apiKey, history = []) {
     const kb = getKnowledge();
     const productNames = Object.keys(kb.products);
 
+    // ==================== STORE LOCATOR CHECK ====================
+    // Check if this is a store/location query using LLM for better context detection
+    console.log(`📍 [STORE LOCATOR] Checking if this is a store query...`);
+    const llmCheck = await isStoreQueryWithLLM(userMessage, apiKey);
+
+    if (llmCheck.isStoreQuery) {
+        console.log(`📍 [STORE LOCATOR] Store query detected (${llmCheck.reasoning})`);
+
+        try {
+            // Use LLM-based store finder (handles location detection + store lookup + response generation)
+            const storeResult = await findStores(userMessage, apiKey);
+
+            // If needs location, ask for it
+            if (storeResult.needsLocation) {
+                console.log(`📍 [STORE LOCATOR] No location provided - asking user`);
+                return {
+                    text: storeResult.text,
+                    imageUrl: null,
+                    productName: null
+                };
+            }
+
+            // If error (e.g., no product identified), continue to AI
+            if (storeResult.error) {
+                console.log(`📍 [STORE LOCATOR] Error: ${storeResult.text}`);
+                // Clear pending since we're giving up on store lookup
+                clearPendingProduct();
+                // Continue to AI for help
+            }
+            // If noContext (no product context), still return message without falling through
+            else if (storeResult.noContext) {
+                console.log(`📍 [STORE LOCATOR] No product context - returning message`);
+                return {
+                    text: storeResult.text,
+                    imageUrl: null,
+                    productName: null
+                };
+            }
+            // If success, return store info
+            else if (storeResult.success) {
+                // If no stores in that area, still return the message - don't fall through to TIER 1.5
+                if (storeResult.noStoresInArea) {
+                    console.log(`📍 [STORE LOCATOR] No stores in area - returning message`);
+                    return {
+                        text: storeResult.text,
+                        imageUrl: null,
+                        productName: null
+                    };
+                }
+                console.log(`📍 [STORE LOCATOR] Returning store info`);
+                // DON'T clear pending - user might want to change location ("How about in Subang Jaya?")
+                // The store locator marks justCompletedSearch to keep pending for follow-ups
+                return {
+                    text: storeResult.text,
+                    imageUrl: null,
+                    productName: storeResult.productSlug || null
+                };
+            }
+        } catch (err) {
+            console.error(`📍 [STORE LOCATOR] Error: ${err.message}`);
+            clearPendingProduct();
+            // On error, continue to normal processing
+        }
+    } else {
+        console.log(`📍 [STORE LOCATOR] Not a store query (${llmCheck.reasoning})`);
+        // User asked something unrelated - clear any pending product
+        clearPendingProduct();
+    }
+    // ==================== END STORE LOCATOR CHECK ====================
+
     // 1. Direct knowledge lookup (TIER 1)
     console.log(`\n📚 [TIER 1] Checking direct knowledge base...`);
     const directAnswer = quickKnowledgeLookup(userMessage);
@@ -483,6 +602,13 @@ async function generateResponse(userMessage, _, apiKey, history = []) {
         // Try to detect product for image
         const productsInMsg = findAllProductNames(userMessage, productNames);
         const detectedProduct = productsInMsg.length > 0 ? findLastProductName(userMessage, productNames) : null;
+
+        // Track mentioned product for store locator context
+        if (detectedProduct) {
+            const slug = getProductSlug(detectedProduct);
+            trackMentionedProduct(slug);
+        }
+
         const imageUrl = detectedProduct ? getProductImageUrl(kb, detectedProduct) : null;
         console.log(`${'='.repeat(60)}\n`);
         return { text: directAnswer, imageUrl, productName: detectedProduct };
@@ -550,6 +676,9 @@ async function generateResponse(userMessage, _, apiKey, history = []) {
 
         // ---- TIER 2: Product page + internal links search ----
         if (detectedProduct) {
+            // Track for store locator context
+            trackMentionedProduct(getProductSlug(detectedProduct));
+
             const productUrl = getProductUrl(kb, detectedProduct);
             if (productUrl) {
                 console.log(`\n📄 [TIER 2] Fetching product page: ${productUrl}`);
@@ -678,6 +807,12 @@ async function generateResponse(userMessage, _, apiKey, history = []) {
     const allProductsInMsg = findAllProductNames(userMessage, productNames);
     const imageProduct = allProductsInMsg.length > 0 ? findLastProductName(userMessage, productNames) : null;
     const imageUrl = imageProduct ? getProductImageUrl(kb, imageProduct) : null;
+
+    // Track product for store locator context (if found in message)
+    if (imageProduct) {
+        const slug = getProductSlug(imageProduct);
+        trackMentionedProduct(slug);
+    }
 
     console.log(`✅✅ [TIER 1.5] SUCCESS - AI answered directly`);
     console.log(`   Response preview: "${reply.substring(0, 100)}..."`);
