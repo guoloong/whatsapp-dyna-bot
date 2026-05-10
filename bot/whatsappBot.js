@@ -179,10 +179,17 @@ function initWhatsAppBot() {
             const contact = await msg.getContact();
             if (contact) {
                 const storedPhone = contact.id?.user || contact.number;
+                console.log(`📞 [CONTACT CACHE] Caching contact: userId=${userId}, storedPhone=${storedPhone}, pushname=${contact.pushname}`);
                 setContact(userId, storedPhone, contact.pushname || null);
+                
+                // Debug: Verify cache was written
+                const verifyPhone = getPhoneNumber(userId);
+                console.log(`📞 [CONTACT CACHE] Verified cache write: ${verifyPhone}`);
+            } else {
+                console.log(`⚠️ [CONTACT CACHE] Contact object is null/undefined for userId=${userId}`);
             }
         } catch (e) {
-            // Silently ignore
+            console.error(`❌ [CONTACT CACHE] Error caching contact: ${e.message}`);
         }
 
         const lowerMsg = msgBody.toLowerCase();
@@ -404,6 +411,59 @@ function initWhatsAppBot() {
         try {
             if (msgBody.length < 2) return;
 
+            // ========== PHONE NUMBER EXTRACTION (for price API) ==========
+            // Extract phone number before calling generateResponse so it can be used for price lookups
+            let phoneNumberForPrice = null;
+
+            try {
+                const contact = await msg.getContact();
+                if (contact) {
+                    console.log(`📞 [PRICE] Contact: number=${contact.number}, pushname=${contact.pushname}, id.user=${contact.id?.user}`);
+
+                    const storedPhone = contact.id?.user || contact.number;
+                    setContact(userId, storedPhone, contact.pushname || null);
+
+                    if (contact.id?.user) {
+                        const userPart = contact.id.user.replace(/[^0-9]/g, '');
+                        if (userPart.length >= 7 && userPart.length <= 15) {
+                            phoneNumberForPrice = userPart;
+                            console.log(`📞 [PRICE] Phone from id.user: ${phoneNumberForPrice}`);
+                        }
+                    }
+
+                    if (!phoneNumberForPrice && contact.number) {
+                        const cleaned = contact.number.replace(/[^0-9]/g, '');
+                        if (cleaned.length >= 7 && cleaned.length <= 15 && /^[89]/.test(cleaned)) {
+                            phoneNumberForPrice = cleaned;
+                            console.log(`📞 [PRICE] Phone from contact.number: ${phoneNumberForPrice}`);
+                        }
+                    }
+                }
+            } catch (e) {
+                console.log(`📞 [PRICE] Could not get contact: ${e.message}`);
+            }
+
+            if (!phoneNumberForPrice) {
+                const cachedPhone = getPhoneNumber(userId);
+                if (cachedPhone) {
+                    phoneNumberForPrice = cachedPhone;
+                    console.log(`📞 [PRICE] Phone from cache: ${phoneNumberForPrice}`);
+                }
+            }
+
+            if (!phoneNumberForPrice) {
+                phoneNumberForPrice = decodeLIDtoPhone(userId);
+                console.log(`📞 [PRICE] Phone decoded from userId: ${phoneNumberForPrice}`);
+            }
+
+            if (!phoneNumberForPrice) {
+                phoneNumberForPrice = userId.replace(/@.*$/, '').replace(/[^0-9]/g, '');
+                console.log(`📞 [PRICE] Phone fallback: ${phoneNumberForPrice}`);
+            }
+
+            console.log(`📞 [PRICE] Final phone number for price lookup: ${phoneNumberForPrice}`);
+            // ========== END PHONE NUMBER EXTRACTION ==========
+
             try {
                 const chat = await msg.getChat();
                 await chat.sendStateTyping();
@@ -416,7 +476,9 @@ function initWhatsAppBot() {
                 msgBody,
                 '',
                 process.env.DEEPSEEK_API_KEY,
-                history
+                history,
+                userId,
+                phoneNumberForPrice
             );
 
             const finalReply = response.text || '⚠️ I\'m having trouble responding. Please try again or contact support.';

@@ -3,13 +3,17 @@ const axios = require('axios');
 const { getKnowledge } = require('./knowledgeLoader');
 const { getSupplementaryInfo } = require('../utils/brochures');
 const { searchWebsite, fetchProductPageAndLinks } = require('../config/botConfig');
-const { isStoreQuery, isStoreQueryWithLLM, findStores, fetchProducts, clearPendingProduct, trackMentionedProduct } = require('./storeLocator');
+const { isStoreQuery, isStoreQueryWithLLM, findStores, fetchProducts, clearPendingProduct, trackMentionedProduct, getLastMentionedProduct } = require('./storeLocator');
+const { getProductPrice, formatPriceResponse, getCurrencyFromPhone, getProductSlug: getPriceApiSlug } = require('./priceApi');
+const { getPhoneNumber } = require('../utils/contactCache');
 
 // Product slug normalization helper
+// Based on actual API slugs from: https://www.dyna-nutrition.com/wp-json/woo-country-price/v1/product-slugs
 const PRODUCT_SLUG_MAP = {
     'BioNatto Plus': 'bionatto',
-    'Men Guard': 'men-guard',
-    'Men Guard Capsule': 'men-guard',
+    'BioNatto': 'bionatto',
+    'Men Guard': 'men-guard-capsule',
+    'Men Guard Capsule': 'men-guard-capsule',
     'Ashislim': 'ashislim',
     'Black Elderberry Juice': 'black-elderberry-juice',
     'Elderola': 'elderola',
@@ -19,15 +23,34 @@ const PRODUCT_SLUG_MAP = {
     'Liveprotein': 'liveprotein',
     'Marinecal Plus': 'marinecal-plus',
     'Nustem': 'nustem',
-    'Optiberries': 'optiberries',
+    'Optiberries': 'optiberries-chewable',
+    'Optiberries Chewable': 'optiberries-chewable',
     'Optivue': 'optivue',
-    'Organic Ashitaba': 'organic-ashitaba',
+    'Organic Ashitaba': 'ashitaba',
     'Super Bio Organic': 'super-bio-organic',
     'Tibetan Seaberry': 'tibetan-seaberry',
     'Tricollagen': 'tricollagen',
     'Uri Comfort': 'uri-comfort',
     'Vitamune CDZ': 'vitamune-cdz',
-    'Riflex 360': 'riflex-360'
+    'Riflex 360': 'vitalguard-riflex-360-capsule',
+    'Vitalguard Riflex 360': 'vitalguard-riflex-360-capsule',
+    'Vitalguard Riflex 360 Capsule': 'vitalguard-riflex-360-capsule',
+    'Cordyzyme': 'cordyzyme',
+    'AshiGuard': 'ashiguard',
+    'ResWell': 'reswell-capsule',
+    'ResWell Capsule': 'reswell-capsule',
+    'Organic Volcanic Triple Green': 'organic-volcanic-triple-green',
+    'Organic Volcanic Wheatgrass': 'organic-volcanic-wheatgrass-juice-powder',
+    'Organic Volcanic Barley Grass': 'organic-volcanic-barley-grass-juice-powder',
+    'Vitalguard Royal Cordyceps': 'vitalguard-royal-cordyceps-capsule',
+    'Premium Organic Red Beet': 'premium-organic-red-beet',
+    'LiveAcerola': 'liveacerola',
+    'NitroVar': 'nitrovar',
+    'LiveEssence': 'liveessence',
+    'LiveZymes': 'livezymes',
+    'LiveBerries': 'liveberries',
+    'Bone Builder Bundle': 'bone-builder-bundle',
+    'Liver Detoxification Bundle': 'liver-detoxification-bundle'
 };
 
 function getProductSlug(productName) {
@@ -154,20 +177,31 @@ function findLastProductName(text, productNames) {
     let lastProduct = null;
     let lastIndex = -1;
     const lowerText = text.toLowerCase();
+    
+    console.log(`🔍 [DEBUG] findLastProductName: searching in "${text}"`);
+    console.log(`🔍 [DEBUG] Available products: ${productNames.join(', ')}`);
+    
     for (const name of productNames) {
         const lowerName = name.toLowerCase();
         let index = lowerText.lastIndexOf(lowerName);
+        
+        console.log(`  🔎 Checking "${name}" (lower: "${lowerName}"): index=${index}`);
+        
         if (index === -1) {
             const shortName = lowerName.replace(' capsule', '').replace(' plus', '').trim();
             if (shortName !== lowerName) {
                 index = lowerText.lastIndexOf(shortName);
+                console.log(`    🔎 Also tried short name "${shortName}": index=${index}`);
             }
         }
         if (index > lastIndex) {
             lastIndex = index;
             lastProduct = name;
+            console.log(`    ✅ New best match: "${name}" at index ${index}`);
         }
     }
+    
+    console.log(`🔍 [DEBUG] Final matched product: "${lastProduct}"`);
     return lastProduct;
 }
 
@@ -310,7 +344,7 @@ function detectIntentWithRegex(userMessage) {
 }
 
 // ------------------- Direct knowledge lookup ---------------------------
-async function quickKnowledgeLookup(userMessage, apiKey = null) {
+async function quickKnowledgeLookup(userMessage, apiKey = null, userId = null, phoneNumber = null) {
     console.log(`📚 === DIRECT LOOKUP ===`);
     const kb = getKnowledge();
     const lowerMsg = userMessage.toLowerCase();
@@ -335,8 +369,25 @@ async function quickKnowledgeLookup(userMessage, apiKey = null) {
         return kb.general?.[intent] || null;
     }
 
-    // Use LLM-detected product if available, otherwise fall back to regex detection
-    const matchedProduct = llmProduct || findLastProductName(userMessage, productNames);
+    // Use LLM-detected product if available, otherwise fall back to regex detection or context
+    let matchedProduct = llmProduct || findLastProductName(userMessage, productNames);
+    
+    // If still no product found, check context (last mentioned product)
+    if (!matchedProduct && intent === 'price') {
+        const lastProduct = getLastMentionedProduct();
+        if (lastProduct) {
+            console.log(`📚 [DEBUG] Using context: last mentioned product = "${lastProduct}"`);
+            // Convert slug back to product name for lookup
+            for (const [productName, productData] of Object.entries(kb.products)) {
+                const slug = getPriceApiSlug(productName);
+                if (slug === lastProduct) {
+                    matchedProduct = productName;
+                    console.log(`📚 [DEBUG] Resolved context slug "${lastProduct}" to product name "${matchedProduct}"`);
+                    break;
+                }
+            }
+        }
+    }
     
     if (!matchedProduct) {
         console.log('📚 ✗ No known product detected');
@@ -344,23 +395,106 @@ async function quickKnowledgeLookup(userMessage, apiKey = null) {
     }
 
     console.log(`📚 Matched product: "${matchedProduct}"`);
-    const product = kb.products[matchedProduct];
-    if (!product) return null;
-
-    // --- Direct field answers (new structured fields) ---
-    // Price
-    if (intent === 'price' || /\b(price|cost|how much|money)\b/.test(lowerMsg)) {
-        console.log('📚 Checking price...');
-        if (typeof product.price === 'object') {
-            const sg = product.price.singapore;
-            if (sg) {
-                return `${matchedProduct} price (Singapore): 1 bottle SGD ${sg['1_bottle']}, 2 bottles SGD ${sg['2_bottle']}, 3 bottles SGD ${sg['3_bottle']}.`;
+    console.log(`📚 [DEBUG] Intent detected: ${intent}`);
+    
+    // First try direct lookup
+    let product = kb.products[matchedProduct];
+    console.log(`📚 [DEBUG] Product object exists (direct): ${!!product}`);
+    console.log(`📚 [DEBUG] Looking for: "${matchedProduct}"`);
+    console.log(`📚 [DEBUG] Available products: ${Object.keys(kb.products).join(', ')}`);
+    
+    // If not found, try to find a product that contains the matched name
+    if (!product) {
+        console.log(`🔍 [DEBUG] Direct lookup failed, trying partial match for "${matchedProduct}"...`);
+        const lowerMatched = matchedProduct.toLowerCase();
+        let foundPartial = false;
+        for (const [productName, productData] of Object.entries(kb.products)) {
+            const lowerProductName = productName.toLowerCase();
+            // Check if matched product is contained in the actual product name
+            const match1 = lowerProductName.includes(lowerMatched);
+            const match2 = lowerMatched.includes(lowerProductName);
+            console.log(`   🔍 Checking "${productName}": includes("${lowerMatched}")=${match1}, "${lowerMatched}".includes="${match2}"`);
+            if (match1 || match2) {
+                console.log(`✅ [DEBUG] Found partial match: "${matchedProduct}" → "${productName}"`);
+                product = productData;
+                foundPartial = true;
+                break;
             }
         }
-        // Fallback to description string
-        const desc = getProductDescription(kb, matchedProduct);
-        const priceMatch = desc.match(/Price[^.]*?:[^.]*?(\d+\.?\d*)/i);
-        if (priceMatch) return `The price of ${matchedProduct} is ${priceMatch[1]}.`;
+        if (!foundPartial) {
+            console.log(`❌ [DEBUG] No partial match found for "${matchedProduct}"`);
+        }
+    }
+    
+    if (!product) {
+        console.log(`❌ [DEBUG] Product "${matchedProduct}" not found in knowledge base`);
+        return null;
+    }
+
+    // --- Direct field answers (new structured fields) ---
+    // Price - NOW FETCHES FROM API INSTEAD OF KNOWLEDGE BASE
+    if (intent === 'price' || /\b(price|cost|how much|money)\b/.test(lowerMsg)) {
+        
+        // Get user's phone number to determine country/currency
+        // Priority: 1) Passed phoneNumber parameter, 2) Cache lookup by userId
+        let phoneNumberForLookup = phoneNumber || null;
+        
+        
+        if (!phoneNumberForLookup && userId) {
+            phoneNumberForLookup = getPhoneNumber(userId);
+            
+            // Debug: Show cache contents for this user
+            const { getContact } = require('../utils/contactCache');
+            const contactData = getContact(userId);
+        } else if (phoneNumberForLookup) {
+        } else {
+        }
+        
+        
+        // CRITICAL: Ensure apiKey is passed to getProductPrice
+        
+        // Check if user specified a currency/country in their message
+        let forcedCurrency = null;
+        const currencyMatch = lowerMsg.match(/\b(myr|rm|malaysia|singapore|sgd|usd|bnd|hkd|idr|twd)\b/i);
+        if (currencyMatch) {
+            const currencyText = currencyMatch[0].toLowerCase();
+            if (currencyText === 'myr' || currencyText === 'rm' || currencyText === 'malaysia') {
+                forcedCurrency = 'MYR';
+            } else if (currencyText === 'sgd' || currencyText === 'singapore') {
+                forcedCurrency = 'SGD';
+            } else if (currencyText === 'usd') {
+                forcedCurrency = 'USD';
+            } else if (currencyText === 'bnd') {
+                forcedCurrency = 'BND';
+            } else if (currencyText === 'hkd') {
+                forcedCurrency = 'HKD';
+            } else if (currencyText === 'idr') {
+                forcedCurrency = 'IDR';
+            } else if (currencyText === 'twd') {
+                forcedCurrency = 'TWD';
+            }
+        }
+        
+        // Fetch price from API (with optional forced currency)
+        const priceInfo = await getProductPrice(matchedProduct, phoneNumberForLookup, apiKey, forcedCurrency);
+        
+        if (priceInfo) {
+            console.log(`✅ Price fetched from API successfully`);
+            console.log(`   Formatted response preview: "${formatPriceResponse(matchedProduct, priceInfo, forcedCurrency).substring(0, 100)}..."`);
+            
+            // Check if requested currency was available
+            if (forcedCurrency && priceInfo.currency !== forcedCurrency) {
+                console.log(`   ⚠️ Requested currency ${forcedCurrency} not available, used ${priceInfo.currency} instead`);
+            }
+        }
+        
+        if (priceInfo && priceInfo.prices && priceInfo.prices.length > 0) {
+            const formattedResponse = formatPriceResponse(matchedProduct, priceInfo, forcedCurrency);
+            return formattedResponse;
+        } else {
+            // Do NOT fall back to knowledge base - prices MUST come from API only
+            return `I'm sorry, but I don't have access to the current pricing information for ${matchedProduct}. Please visit our website or contact our customer service for the latest prices.`;
+        }
     }
 
     // Dosage / how to take / before/after meal
@@ -623,88 +757,181 @@ async function callDeepSeekWithRetry(messages, apiKey, maxRetries = 3) {
 
 // ------------------- Main response generator ---------------------------
 // Returns: { text: string, imageUrl: string|null, productName: string|null }
-async function generateResponse(userMessage, _, apiKey, history = []) {
+async function generateResponse(userMessage, _, apiKey, history = [], userId = null, phoneNumber = null) {
     console.log(`\n${'='.repeat(60)}`);
     console.log(`💬 NEW QUERY: "${userMessage}"`);
     console.log(`📜 History length: ${history.length} messages`);
     console.log(`${'='.repeat(60)}`);
+    console.log(`📞 Phone number passed to generateResponse: ${phoneNumber || 'NOT PROVIDED'}`);
 
     const kb = getKnowledge();
     const productNames = Object.keys(kb.products);
 
-    // ==================== STORE LOCATOR CHECK ====================
-    // Check if this is a store/location query using LLM for better context detection
-    console.log(`📍 [STORE LOCATOR] Checking if this is a store query...`);
-    const llmCheck = await isStoreQueryWithLLM(userMessage, apiKey);
-
-    if (llmCheck.isStoreQuery) {
-        console.log(`📍 [STORE LOCATOR] Store query detected (${llmCheck.reasoning})`);
-
+    // ==================== PRICE QUERY ANALYSIS (Like Store Locator) ====================
+    // Analyze price queries early to extract product and currency
+    // This must happen BEFORE store locator check to avoid misrouting
+    const isPriceQuery = /\b(price|cost|how much|money)\b/i.test(userMessage) ||
+                         /\b(myr|rm|malaysia|singapore|sgd|usd|bnd|hkd|idr|twd)\b/i.test(userMessage) ||
+                         /\b(in|at|for)\s+(malaysia|singapore|usa|brunei|hongkong|indonesia|taiwan)\b/i.test(userMessage);
+    
+    if (isPriceQuery) {
+        
+        
+        // Step 1: Detect if user mentioned a NEW product (replaces last product)
+        let detectedProduct = null;
+        const productsInMsg = findAllProductNames(userMessage, productNames);
+        if (productsInMsg.length > 0) {
+            detectedProduct = findLastProductName(userMessage, productNames);
+            
+            // Update context: new product replaces old product
+            const slug = getProductSlug(detectedProduct);
+            trackMentionedProduct(slug);
+        }
+        
+        // Step 2: If no new product, use last mentioned product
+        let productToUse = detectedProduct;
+        if (!productToUse) {
+            const lastProduct = getLastMentionedProduct();
+            if (lastProduct) {
+                productToUse = lastProduct;
+                
+            }
+        }
+        
+        // Step 3: If still no product, ask user to specify
+        if (!productToUse) {
+            
+            return {
+                text: "Could you please specify which product you'd like to know the price for? 😊\n\nFor example: *BioNatto Plus*, *GlucoPal*, *AshiSlim Plus*, etc.",
+                imageUrl: null,
+                productName: null
+            };
+        }
+        
+        // Step 4: Extract forced currency from message
+        let forcedCurrency = null;
+        const currencyMatch = userMessage.match(/\b(MYR|RM|SGD|USD|BND|HKD|IDR|TWD)\b/i);
+        const countryMatch = userMessage.match(/\b(malaysia|singapore|usa|brunei|hongkong|indonesia|taiwan)\b/i);
+        
+        if (currencyMatch) {
+            forcedCurrency = currencyMatch[0].toUpperCase();
+            if (forcedCurrency === 'RM') forcedCurrency = 'MYR';
+        } else if (countryMatch) {
+            const countryMap = {
+                'malaysia': 'MYR',
+                'singapore': 'SGD',
+                'usa': 'USD',
+                'brunei': 'BND',
+                'hongkong': 'HKD',
+                'indonesia': 'IDR',
+                'taiwan': 'TWD'
+            };
+            forcedCurrency = countryMap[countryMatch[0].toLowerCase()];
+        }
+        
+        
+        
+        // Step 5: Call price API with resolved product and currency
         try {
-            // Use LLM-based store finder (handles location detection + store lookup + response generation)
-            const storeResult = await findStores(userMessage, apiKey);
-
-            // If needs location, ask for it
-            if (storeResult.needsLocation) {
-                console.log(`📍 [STORE LOCATOR] No location provided - asking user`);
+            const priceInfo = await getProductPrice(productToUse, phoneNumber, apiKey, forcedCurrency);
+            
+            if (priceInfo && priceInfo.currency && priceInfo.prices && priceInfo.prices.length > 0) {
+                const formattedResponse = formatPriceResponse(productToUse, priceInfo, forcedCurrency);
+                
+                
+                // Ensure product is tracked for image
+                if (!detectedProduct) {
+                    trackMentionedProduct(productToUse);
+                }
+                
                 return {
-                    text: storeResult.text,
-                    imageUrl: null,
-                    productName: null
+                    text: formattedResponse,
+                    imageUrl: productToUse,
+                    productName: typeof productToUse === 'string' ? findLastProductName(productToUse, productNames) || productToUse : productToUse
                 };
+            } else {
+                
             }
+        } catch (err) {
+            console.error(`⚠️ [PRICE] Error: ${err.message}`);
+        }
+        
+        // If we reach here, API call failed - continue to normal processing
+    } else {
+        // ==================== STORE LOCATOR CHECK ====================
+        // Check if this is a store/location query using LLM for better context detection
+        console.log(`📍 [STORE LOCATOR] Checking if this is a store query...`);
+        const llmCheck = await isStoreQueryWithLLM(userMessage, apiKey);
 
-            // If error (e.g., no product identified), continue to AI
-            if (storeResult.error) {
-                console.log(`📍 [STORE LOCATOR] Error: ${storeResult.text}`);
-                // Clear pending since we're giving up on store lookup
-                clearPendingProduct();
-                // Continue to AI for help
-            }
-            // If noContext (no product context), still return message without falling through
-            else if (storeResult.noContext) {
-                console.log(`📍 [STORE LOCATOR] No product context - returning message`);
-                return {
-                    text: storeResult.text,
-                    imageUrl: null,
-                    productName: null
-                };
-            }
-            // If success, return store info
-            else if (storeResult.success) {
-                // If no stores in that area, still return the message - don't fall through to TIER 1.5
-                if (storeResult.noStoresInArea) {
-                    console.log(`📍 [STORE LOCATOR] No stores in area - returning message`);
+        if (llmCheck.isStoreQuery) {
+            console.log(`📍 [STORE LOCATOR] Store query detected (${llmCheck.reasoning})`);
+
+            try {
+                // Use LLM-based store finder (handles location detection + store lookup + response generation)
+                const storeResult = await findStores(userMessage, apiKey);
+
+                // If needs location, ask for it
+                if (storeResult.needsLocation) {
+                    console.log(`📍 [STORE LOCATOR] No location provided - asking user`);
                     return {
                         text: storeResult.text,
                         imageUrl: null,
                         productName: null
                     };
                 }
-                console.log(`📍 [STORE LOCATOR] Returning store info`);
-                // DON'T clear pending - user might want to change location ("How about in Subang Jaya?")
-                // The store locator marks justCompletedSearch to keep pending for follow-ups
-                return {
-                    text: storeResult.text,
-                    imageUrl: null,
-                    productName: storeResult.productSlug || null
-                };
+
+                // If error (e.g., no product identified), continue to AI
+                if (storeResult.error) {
+                    console.log(`📍 [STORE LOCATOR] Error: ${storeResult.text}`);
+                    // Clear pending since we're giving up on store lookup
+                    clearPendingProduct();
+                    // Continue to AI for help
+                }
+                // If noContext (no product context), still return message without falling through
+                else if (storeResult.noContext) {
+                    console.log(`📍 [STORE LOCATOR] No product context - returning message`);
+                    return {
+                        text: storeResult.text,
+                        imageUrl: null,
+                        productName: null
+                    };
+                }
+                // If success, return store info
+                else if (storeResult.success) {
+                    // If no stores in that area, still return the message - don't fall through to TIER 1.5
+                    if (storeResult.noStoresInArea) {
+                        console.log(`📍 [STORE LOCATOR] No stores in area - returning message`);
+                        return {
+                            text: storeResult.text,
+                            imageUrl: null,
+                            productName: null
+                        };
+                    }
+                    console.log(`📍 [STORE LOCATOR] Returning store info`);
+                    // DON'T clear pending - user might want to change location ("How about in Subang Jaya?")
+                    // The store locator marks justCompletedSearch to keep pending for follow-ups
+                    return {
+                        text: storeResult.text,
+                        imageUrl: null,
+                        productName: storeResult.productSlug || null
+                    };
+                }
+            } catch (err) {
+                console.error(`📍 [STORE LOCATOR] Error: ${err.message}`);
+                clearPendingProduct();
+                // On error, continue to normal processing
             }
-        } catch (err) {
-            console.error(`📍 [STORE LOCATOR] Error: ${err.message}`);
+        } else {
+            console.log(`📍 [STORE LOCATOR] Not a store query (${llmCheck.reasoning})`);
+            // User asked something unrelated - clear any pending product
             clearPendingProduct();
-            // On error, continue to normal processing
         }
-    } else {
-        console.log(`📍 [STORE LOCATOR] Not a store query (${llmCheck.reasoning})`);
-        // User asked something unrelated - clear any pending product
-        clearPendingProduct();
     }
     // ==================== END STORE LOCATOR CHECK ====================
 
     // 1. Direct knowledge lookup (TIER 1)
     console.log(`\n📚 [TIER 1] Checking direct knowledge base...`);
-    const directAnswer = await quickKnowledgeLookup(userMessage, apiKey);
+    const directAnswer = await quickKnowledgeLookup(userMessage, apiKey, userId, phoneNumber);
     if (directAnswer) {
         console.log(`✅✅ [TIER 1] SUCCESS - Found direct answer`);
         console.log(`   Answer preview: "${directAnswer.substring(0, 100)}..."`);
