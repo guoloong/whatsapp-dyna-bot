@@ -148,7 +148,7 @@ async function parsePriceWithLLM(productData, currency, apiKey) {
         // Fallback to manual parsing if no LLM available
         return parsePriceManually(productData, currency);
     }
-    
+
     try {
         const prompt = `You are a price data parser. Analyze this product price data from an API response and extract the relevant pricing information.
 
@@ -158,10 +158,11 @@ ${JSON.stringify(productData, null, 2)}
 USER'S CURRENCY: ${currency || 'Not specified (use default_currency)'}
 
 IMPORTANT RULES:
-1. Filter OUT any variations that are subscription plans. Subscription plans contain phrases like "per 4 weeks", "per 6 weeks", "per 8 weeks", "per 12 weeks", "subscription", "auto-deliver", or "recurring".
-2. Only include regular purchase options (e.g., "1 Box", "2 boxes", "3 boxes", "Buy 1 Free 1").
-3. If the user's currency is specified, show prices in that currency ONLY IF it exists in the currency_prices object. If not available, use the default_currency.
-4. Format the output as a clear, readable price list.
+1. Separate regular prices from subscription plans.
+2. Regular prices: "1 Box", "2 boxes", "3 boxes", "Buy 1 Free 1", etc.
+3. Subscription plans contain phrases like "per 4 weeks", "per 6 weeks", "per 8 weeks", "per 12 weeks", "subscription", "auto-deliver", or "recurring". Include these in "subscriptions" array.
+4. If the user's currency is specified, show prices in that currency ONLY IF it exists in the currency_prices object. If not available, use the default_currency.
+5. Format the output as a clear, readable price list.
 
 Return ONLY a JSON object with this format:
 {
@@ -171,16 +172,19 @@ Return ONLY a JSON object with this format:
         {"option": "1 Box", "price": 100, "discount": "none"},
         {"option": "2 boxes", "price": 180, "discount": "5% off"}
     ],
+    "subscriptions": [
+        {"option": "Subscription per 4 weeks", "price": 85, "discount": "none"}
+    ],
     "defaultCurrency": "MYR"
 }
 
-If no valid non-subscription prices are found, return:
+If no valid prices are found, return:
 {
     "productName": "Product Name",
     "currency": null,
     "prices": [],
-    "defaultCurrency": "MYR",
-    "note": "Only subscription plans available"
+    "subscriptions": [],
+    "defaultCurrency": "MYR"
 }`;
 
         const response = await axios.post(
@@ -192,7 +196,7 @@ If no valid non-subscription prices are found, return:
                     { role: 'user', content: prompt }
                 ],
                 temperature: 0,
-                max_tokens: 500
+                max_tokens: 600
             },
             {
                 headers: { 'Authorization': `Bearer ${apiKey}` },
@@ -201,14 +205,18 @@ If no valid non-subscription prices are found, return:
         );
 
         const content = response.data.choices[0].message.content.trim();
-        
+
         const jsonMatch = content.match(/\{[\s\S]*\}/);
-        
+
         if (jsonMatch) {
             const result = JSON.parse(jsonMatch[0]);
+            // Ensure subscriptions array exists
+            if (!result.subscriptions) {
+                result.subscriptions = [];
+            }
             return result;
         }
-        
+
         throw new Error('Invalid JSON from LLM');
     } catch (err) {
         console.error(`   ❌ [LLM PARSER] LLM price parsing failed: ${err.message}, falling back to manual`);
@@ -222,25 +230,21 @@ function parsePriceManually(productData, preferredCurrency) {
     if (!productData || !productData.variations || productData.variations.length === 0) {
         return null;
     }
-    
+
     // Determine currency to use
     let currency = preferredCurrency || productData.default_currency;
-    
+
     const prices = [];
-    
+    const subscriptions = [];  // Separate list for subscriptions
+
     for (const variation of productData.variations) {
         const setAttr = variation.attributes?.set || '';
-        
-        // Skip subscription plans
-        if (isSubscriptionPlan(setAttr)) {
-            continue;
-        }
-        
+
         // Get price for the preferred currency ONLY if it exists
         // If preferred currency doesn't exist, fall back to default currency
         let price = null;
         let usedCurrency = currency;
-        
+
         if (variation.currency_prices && variation.currency_prices[currency]) {
             // Preferred currency exists, use it
             price = variation.currency_prices[currency];
@@ -252,7 +256,7 @@ function parsePriceManually(productData, preferredCurrency) {
             // No preferred currency specified, use default
             price = variation.currency_prices[productData.default_currency];
         }
-        
+
         if (price !== null) {
             // Extract discount info from the set attribute
             let discount = 'none';
@@ -262,19 +266,30 @@ function parsePriceManually(productData, preferredCurrency) {
             } else if (/free/i.test(setAttr)) {
                 discount = 'Buy 1 Free 1';
             }
-            
-            prices.push({
-                option: setAttr,
-                price: price,
-                discount: discount
-            });
+
+            // Separate subscriptions from regular prices
+            if (isSubscriptionPlan(setAttr)) {
+                subscriptions.push({
+                    option: setAttr,
+                    price: price,
+                    discount: discount,
+                    isSubscription: true
+                });
+            } else {
+                prices.push({
+                    option: setAttr,
+                    price: price,
+                    discount: discount
+                });
+            }
         }
     }
-    
+
     return {
         productName: productData.slug,
         currency: currency,
         prices: prices,
+        subscriptions: subscriptions,  // Include subscriptions in response
         defaultCurrency: productData.default_currency
     };
 }
@@ -304,18 +319,18 @@ async function getProductPrice(productName, phoneNumber, apiKey = null, forcedCu
 
 // Format price response for user
 function formatPriceResponse(productName, priceInfo, requestedCurrency = null) {
-    if (!priceInfo || !priceInfo.prices || priceInfo.prices.length === 0) {
+    if (!priceInfo || (!priceInfo.prices || priceInfo.prices.length === 0) && (!priceInfo.subscriptions || priceInfo.subscriptions.length === 0)) {
         return `I'm sorry, I couldn't find pricing information for ${productName}. Please contact our support team for assistance.`;
     }
-    
+
     const currency = priceInfo.currency || priceInfo.defaultCurrency || 'MYR';
     const currencySymbol = getCurrencySymbol(currency);
-    
+
     let response = `Here are the prices for *${productName}*:\n\n`;
-    
+
     // Sort prices in ascending order by price value
     const sortedPrices = [...priceInfo.prices].sort((a, b) => a.price - b.price);
-    
+
     for (const price of sortedPrices) {
         // Always format price with 2 decimal places
         const formattedPrice = price.price.toFixed(2);
@@ -333,16 +348,7 @@ function formatPriceResponse(productName, priceInfo, requestedCurrency = null) {
         }
         response += `• ${price.option}: ${priceStr}${discountStr}\n`;
     }
-    
-    // Show currency note if:
-    // 1. User requested a specific currency different from default, OR
-    // 2. The returned currency is different from the phone-based default
-    if (requestedCurrency && requestedCurrency !== priceInfo.defaultCurrency) {
-        response += `\n_(Prices shown in ${requestedCurrency})_`;
-    } else if (priceInfo.currency && priceInfo.currency !== priceInfo.defaultCurrency) {
-        response += `\n_(Prices shown in ${priceInfo.currency})_`;
-    }
-    
+
     return response;
 }
 

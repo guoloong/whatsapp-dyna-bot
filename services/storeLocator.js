@@ -84,6 +84,28 @@ function normalizeProductSlug(productName) {
     return slug;
 }
 
+/**
+ * Check if location is a country that needs more specific area
+ * Stores only exist in Malaysia and Singapore - only Malaysia is too broad
+ */
+function isBigRegion(location) {
+    if (!location) return false;
+    const lowerLoc = location.toLowerCase();
+    // Only Malaysia is too broad - Singapore is small enough
+    if (lowerLoc.includes('malaysia') || lowerLoc === 'kl' || lowerLoc.includes('kuala lumpur')) {
+        return true;
+    }
+    return false;
+}
+
+function getSpecificAreasMessage(location) {
+    const lowerLoc = location.toLowerCase();
+    if (lowerLoc.includes('malaysia') || lowerLoc.includes('kuala lumpur') || lowerLoc === 'kl') {
+        return `Malaysia is a large country. Could you please share a more specific area?\n\nFor example:\n‚Ä¢ "in Subang Jaya"\n‚Ä¢ "near KLCC"\n‚Ä¢ "in Shah Alam"\n‚Ä¢ "in Petaling Jaya"`;
+    }
+    return `Could you share a more specific area?\n\nFor example:\n‚Ä¢ "in [area name]"\n‚Ä¢ "near [landmark]"`;
+}
+
 // Known locations for reference
 const KNOWN_LOCATIONS = [
     'kuala lumpur', 'kl', 'petaling jaya', 'pj', 'subang jaya', 'subang', 'usj',
@@ -100,7 +122,7 @@ function trackMentionedProduct(productSlug) {
     if (productSlug) {
         lastMentionedProductSlug = productSlug;
         lastMentionedTimestamp = Date.now();
-        console.log(`Ì†ΩÌ≥ç [STORE LOCATOR] Tracked last mentioned product: ${productSlug}`);
+        console.log(`ÔøΩÔøΩÔøΩÔøΩÔøΩÔøΩ [STORE LOCATOR] Tracked last mentioned product: ${productSlug}`);
     }
 }
 
@@ -292,7 +314,11 @@ ${storeData}`;
             return store;
         });
     } catch (err) {
-        console.log(`‚ö†Ô∏è LLM store parsing failed: ${err.message}`);
+        if (err.code === 'ECONNABORTED' || err.name === 'CanceledError' || err.message.includes('abort')) {
+            console.log(`‚ö†Ô∏è LLM store parsing timed out (${err.message}) - using basic cleanup`);
+        } else {
+            console.log(`‚ö†Ô∏è LLM store parsing failed: ${err.message}`);
+        }
         // Fallback: basic cleanup
         return stores.map(s => ({
             ...s,
@@ -407,7 +433,11 @@ Tip: Call ahead to confirm availability before visiting."`;
         clearTimeout(timeoutId);
         return response.data.choices[0].message.content.trim();
     } catch (err) {
-        console.log(`‚ö†Ô∏è LLM response generation failed: ${err.message}`);
+        if (err.code === 'ECONNABORTED' || err.name === 'CanceledError' || err.message.includes('abort')) {
+            console.log(`‚ö†Ô∏è LLM response generation timed out - using manual formatting`);
+        } else {
+            console.log(`‚ö†Ô∏è LLM response generation failed: ${err.message}`);
+        }
         // Fallback: format ourselves
         return formatStoresManually(productName, stores, location);
     }
@@ -466,7 +496,7 @@ async function fetchStoresForProduct(productSlug, forceRefresh = false) {
     if (!forceRefresh && storeCache.has(cacheKey)) {
         const cached = storeCache.get(cacheKey);
         if (now - cached.time < STORE_CACHE_TTL) {
-            console.log(`Ì†ΩÌ≥¶ [STORE LOCATOR] Using cached stores for ${productSlug}`);
+            console.log(`ÔøΩÔøΩÔøΩÔøΩÔøΩÔøΩ [STORE LOCATOR] Using cached stores for ${productSlug}`);
             return cached.data;
         }
     }
@@ -477,7 +507,7 @@ async function fetchStoresForProduct(productSlug, forceRefresh = false) {
 
         if (response.data && response.data.stores) {
             storeCache.set(cacheKey, { data: response.data.stores, time: now });
-            console.log(`Ì†ΩÌ≥¶ [STORE LOCATOR] Cached ${response.data.stores.length} stores for ${productSlug}`);
+            console.log(`ÔøΩÔøΩÔøΩÔøΩÔøΩÔøΩ [STORE LOCATOR] Cached ${response.data.stores.length} stores for ${productSlug}`);
             return response.data.stores;
         }
         return [];
@@ -493,9 +523,12 @@ async function fetchStoresForProduct(productSlug, forceRefresh = false) {
 
 /**
  * Main function: Find and return store information
+ * @param {string} userMessage - The user's message
+ * @param {string} apiKey - API key
+ * @param {boolean} hasProductContext - If true, user already mentioned a product (e.g., "Where can I buy X in Y")
  */
-async function findStores(userMessage, apiKey) {
-    console.log(`Ì†ΩÌ≥ç [STORE LOCATOR] Analyzing: "${userMessage}"`);
+async function findStores(userMessage, apiKey, hasProductContext = false) {
+    console.log(`ÔøΩÔøΩÔøΩÔøΩÔøΩÔøΩ [STORE LOCATOR] Analyzing: "${userMessage}"`);
 
     // Check for pending product from previous interaction
     const now = Date.now();
@@ -503,13 +536,13 @@ async function findStores(userMessage, apiKey) {
 
     // Step 1: Use LLM to understand user intent
     const intent = await analyzeUserIntent(userMessage, apiKey);
-    console.log(`Ì†ΩÌ≥ç [STORE LOCATOR] Intent:`, intent);
+    console.log(`ÔøΩÔøΩÔøΩÔøΩÔøΩÔøΩ [STORE LOCATOR] Intent:`, intent);
 
     // Check if this is a location-only response (user just sent location)
     const isLocationOnly = !intent.productSlug && intent.location && hasPendingProduct;
 
     if (isLocationOnly) {
-        console.log(`Ì†ΩÌ≥ç [STORE LOCATOR] Using pending product: ${pendingProductSlug}`);
+        console.log(`ÔøΩÔøΩÔøΩÔøΩÔøΩÔøΩ [STORE LOCATOR] Using pending product: ${pendingProductSlug}`);
         // Use the pending product with this location
         intent.productSlug = pendingProductSlug;
         intent.needsLocation = false;
@@ -521,7 +554,7 @@ async function findStores(userMessage, apiKey) {
     if (intent.productSlug && (intent.needsLocation || intent.location)) {
         pendingProductSlug = intent.productSlug;
         pendingTimestamp = now;
-        console.log(`Ì†ΩÌ≥ç [STORE LOCATOR] Stored pending product: ${pendingProductSlug}`);
+        console.log(`ÔøΩÔøΩÔøΩÔøΩÔøΩÔøΩ [STORE LOCATOR] Stored pending product: ${pendingProductSlug}`);
     }
 
     // Step 2: If needs location but none provided, ask for it
@@ -533,11 +566,24 @@ async function findStores(userMessage, apiKey) {
         };
     }
 
+    // Step 2.5: Check if location is too broad (big country/region)
+    // If user says "Malaysia" or "KL" or "Johor" without specific area, ask for more specific area
+    // BUT: If user already mentioned a product (like "Where to buy BioNatto in Malaysia"), skip this check
+    if (intent.location && isBigRegion(intent.location) && !hasProductContext) {
+        console.log(`Ì†ΩÌ¥ç [STORE LOCATOR] Location "${intent.location}" is too broad, asking for specific area`);
+        return {
+            needsLocation: true,
+            text: getSpecificAreasMessage(intent.location),
+            productSlug: intent.productSlug,
+            location: intent.location
+        };
+    }
+
     // Step 3: If no product identified, return error
     if (!intent.productSlug) {
         // Check if this is a follow-up location change with pending product
         if (intent.location && hasPendingProduct) {
-            console.log(`Ì†ΩÌ≥ç [STORE LOCATOR] Using pending product: ${pendingProductSlug}`);
+            console.log(`ÔøΩÔøΩÔøΩÔøΩÔøΩÔøΩ [STORE LOCATOR] Using pending product: ${pendingProductSlug}`);
             intent.productSlug = pendingProductSlug;
             intent.needsLocation = false;
             intent.intent = 'find_stores';
@@ -546,7 +592,7 @@ async function findStores(userMessage, apiKey) {
         else if (!intent.productSlug && intent.location) {
             const lastProduct = getLastMentionedProduct();
             if (lastProduct) {
-                console.log(`Ì†ΩÌ≥ç [STORE LOCATOR] Using last mentioned product: ${lastProduct}`);
+                console.log(`ÔøΩÔøΩÔøΩÔøΩÔøΩÔøΩ [STORE LOCATOR] Using last mentioned product: ${lastProduct}`);
                 intent.productSlug = lastProduct;
                 intent.needsLocation = false;
                 intent.intent = 'find_stores';
@@ -558,7 +604,7 @@ async function findStores(userMessage, apiKey) {
             // Try ONE MORE time - check last mentioned product again
             const lastProduct = getLastMentionedProduct();
             if (lastProduct) {
-                console.log(`Ì†ΩÌ≥ç [STORE LOCATOR] Using last mentioned product: ${lastProduct}`);
+                console.log(`ÔøΩÔøΩÔøΩÔøΩÔøΩÔøΩ [STORE LOCATOR] Using last mentioned product: ${lastProduct}`);
                 intent.productSlug = lastProduct;
                 intent.needsLocation = false;
                 intent.intent = 'find_stores';
@@ -578,7 +624,7 @@ async function findStores(userMessage, apiKey) {
     // Only clear when: 1) timeout expires, 2) user asks unrelated, 3) user completes search
 
     // Step 4: Fetch stores for the product
-    console.log(`Ì†ΩÌ≥ç [STORE LOCATOR] Fetching stores for: ${intent.productSlug}`);
+    console.log(`ÔøΩÔøΩÔøΩÔøΩÔøΩÔøΩ [STORE LOCATOR] Fetching stores for: ${intent.productSlug}`);
     const stores = await fetchStoresForProduct(intent.productSlug);
 
     if (stores.length === 0) {
@@ -590,7 +636,7 @@ async function findStores(userMessage, apiKey) {
         };
     }
 
-    console.log(`Ì†ΩÌ≥¶ [STORE LOCATOR] Found ${stores.length} stores, parsing with LLM...`);
+    console.log(`ÔøΩÔøΩÔøΩÔøΩÔøΩÔøΩ [STORE LOCATOR] Found ${stores.length} stores, parsing with LLM...`);
 
     // Step 5: Parse store data with LLM
     const parsedStores = await parseStoresWithLLM(stores, apiKey);
@@ -619,15 +665,15 @@ async function findStores(userMessage, apiKey) {
 
         if (filteredStores.length === 0) {
             // No stores in that location - tell user instead of showing all
-            console.log(`Ì†ΩÌ≥ç [STORE LOCATOR] No stores in ${intent.location}`);
+            console.log(`ÔøΩÔøΩÔøΩÔøΩÔøΩÔøΩ [STORE LOCATOR] No stores in ${intent.location}`);
             noStoresInArea = true;
         } else {
             // Store total count for "more results" message
-            console.log(`Ì†ΩÌ≥ç [STORE LOCATOR] Found ${filteredStores.length} stores in ${intent.location}`);
+            console.log(`ÔøΩÔøΩÔøΩÔøΩÔøΩÔøΩ [STORE LOCATOR] Found ${filteredStores.length} stores in ${intent.location}`);
         }
     } else {
         // No location filter - show all (will be limited to 7 in response)
-        console.log(`Ì†ΩÌ≥ç [STORE LOCATOR] Found ${parsedStores.length} total stores`);
+        console.log(`ÔøΩÔøΩÔøΩÔøΩÔøΩÔøΩ [STORE LOCATOR] Found ${parsedStores.length} total stores`);
     }
 
     // Handle no stores in area - return friendly message, don't fall through to TIER 1.5
@@ -721,7 +767,7 @@ Examples:
         let jsonStr = content.replace(/```json\n?|```\n?/gi, '').trim();
         const parsed = JSON.parse(jsonStr);
 
-        console.log(`Ì†ΩÌ≥ç [STORE LOCATOR] LLM isStoreQuery: ${parsed.isStoreQuery} - ${parsed.reasoning}`);
+        console.log(`ÔøΩÔøΩÔøΩÔøΩÔøΩÔøΩ [STORE LOCATOR] LLM isStoreQuery: ${parsed.isStoreQuery} - ${parsed.reasoning}`);
         return {
             isStoreQuery: parsed.isStoreQuery === true,
             reasoning: parsed.reasoning || ''
@@ -807,5 +853,6 @@ module.exports = {
     analyzeUserIntent,
     clearPendingProduct,
     trackMentionedProduct,
-    getLastMentionedProduct
+    getLastMentionedProduct,
+    normalizeProductSlug
 };
