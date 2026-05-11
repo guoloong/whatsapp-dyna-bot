@@ -144,21 +144,12 @@ function isSubscriptionPlan(variationSet) {
 
 // Parse product price data using LLM (preferred method)
 async function parsePriceWithLLM(productData, currency, apiKey) {
-    console.log(`   🔍 [LLM PARSER] parsePriceWithLLM called:`);
-    console.log(`      - productData present: ${!!productData}`);
-    console.log(`      - currency: ${currency || 'NULL'}`);
-    console.log(`      - apiKey present: ${!!apiKey}`);
-    
     if (!productData || !apiKey) {
-        console.log(`   ⚠️ [LLM PARSER] No product data or API key, using manual parser`);
-        console.log(`   🔑 [LLM PARSER DEBUG] apiKey present: ${!!apiKey}, productData present: ${!!productData}`);
         // Fallback to manual parsing if no LLM available
         return parsePriceManually(productData, currency);
     }
     
     try {
-        console.log(`   🤖 [LLM PARSER] Parsing price data with LLM...`);
-        console.log(`   🔑 [LLM PARSER DEBUG] Using API key: ${apiKey.substring(0, 10)}...`);
         const prompt = `You are a price data parser. Analyze this product price data from an API response and extract the relevant pricing information.
 
 PRODUCT DATA:
@@ -192,7 +183,6 @@ If no valid non-subscription prices are found, return:
     "note": "Only subscription plans available"
 }`;
 
-        console.log(`   📝 [LLM PARSER] Sending request to DeepSeek API...`);
         const response = await axios.post(
             'https://api.deepseek.com/v1/chat/completions',
             {
@@ -210,23 +200,18 @@ If no valid non-subscription prices are found, return:
             }
         );
 
-        console.log(`   ✅ [LLM PARSER] DeepSeek API responded with status: ${response.status}`);
         const content = response.data.choices[0].message.content.trim();
-        console.log(`   🤖 [LLM PARSER] LLM response: ${content.substring(0, 500)}...`);
         
         const jsonMatch = content.match(/\{[\s\S]*\}/);
         
         if (jsonMatch) {
             const result = JSON.parse(jsonMatch[0]);
-            console.log(`   ✅ [LLM PARSER] Successfully parsed with LLM`);
-            console.log(`   📊 [LLM PARSER] Result:`, JSON.stringify(result));
             return result;
         }
         
         throw new Error('Invalid JSON from LLM');
     } catch (err) {
         console.error(`   ❌ [LLM PARSER] LLM price parsing failed: ${err.message}, falling back to manual`);
-        console.error(`   🔍 [LLM PARSER] Error details:`, err.response?.data || err.code || err.message);
         // Fallback to manual parsing
         return parsePriceManually(productData, currency);
     }
@@ -234,27 +219,20 @@ If no valid non-subscription prices are found, return:
 
 // Manual price parsing (fallback when LLM unavailable)
 function parsePriceManually(productData, preferredCurrency) {
-    console.log(`   🔧 [MANUAL PARSER] Using manual price parser`);
-    console.log(`   🔍 [MANUAL PARSER DEBUG] Input - productData present: ${!!productData}, preferredCurrency: ${preferredCurrency || 'NULL'}`);
-    
     if (!productData || !productData.variations || productData.variations.length === 0) {
-        console.log(`   ⚠️ [MANUAL PARSER] No variations found in product data`);
         return null;
     }
     
     // Determine currency to use
     let currency = preferredCurrency || productData.default_currency;
-    console.log(`   💱 [MANUAL PARSER] Requested currency: ${preferredCurrency || 'NULL'}, using: ${currency}`);
     
     const prices = [];
     
     for (const variation of productData.variations) {
         const setAttr = variation.attributes?.set || '';
-        console.log(`   🔍 [MANUAL PARSER] Processing variation: "${setAttr}"`);
         
         // Skip subscription plans
         if (isSubscriptionPlan(setAttr)) {
-            console.log(`   ⏭️ [MANUAL PARSER] Skipping subscription plan: "${setAttr}"`);
             continue;
         }
         
@@ -266,18 +244,13 @@ function parsePriceManually(productData, preferredCurrency) {
         if (variation.currency_prices && variation.currency_prices[currency]) {
             // Preferred currency exists, use it
             price = variation.currency_prices[currency];
-            console.log(`   💰 [MANUAL PARSER] Found price for requested currency ${currency}: ${price} (option: "${setAttr}")`);
         } else if (preferredCurrency && productData.default_currency && variation.currency_prices[productData.default_currency]) {
             // Preferred currency was requested but doesn't exist, use default instead
             price = variation.currency_prices[productData.default_currency];
             usedCurrency = productData.default_currency;
-            console.log(`   ⚠️ [MANUAL PARSER] Requested currency ${currency} not available, using default ${productData.default_currency}: ${price} (option: "${setAttr}")`);
         } else if (!preferredCurrency && productData.default_currency && variation.currency_prices[productData.default_currency]) {
             // No preferred currency specified, use default
             price = variation.currency_prices[productData.default_currency];
-            console.log(`   💰 [MANUAL PARSER] Using default currency ${productData.default_currency}: ${price} (option: "${setAttr}")`);
-        } else {
-            console.log(`   ⚠️ [MANUAL PARSER] No price found for ${currency} or default, skipping`);
         }
         
         if (price !== null) {
@@ -295,13 +268,7 @@ function parsePriceManually(productData, preferredCurrency) {
                 price: price,
                 discount: discount
             });
-            console.log(`   ✅ [MANUAL PARSER] Added price: ${setAttr} = ${price} (${discount}) in ${usedCurrency}`);
         }
-    }
-    
-    console.log(`   ✅ [MANUAL PARSER] Parsed ${prices.length} non-subscription prices`);
-    if (prices.length > 0) {
-        console.log(`   📊 [MANUAL PARSER] Final prices:`, JSON.stringify(prices));
     }
     
     return {
@@ -314,45 +281,23 @@ function parsePriceManually(productData, preferredCurrency) {
 
 // Main function to get product price for a user
 async function getProductPrice(productName, phoneNumber, apiKey = null, forcedCurrency = null) {
-    console.log(`💰 [PRICE API] Getting price for "${productName}" (phone: ${phoneNumber || 'NULL'}, forcedCurrency: ${forcedCurrency || 'NULL'})`);
-    console.log(`🔑 [PRICE API DEBUG] apiKey parameter: ${apiKey ? 'PRESENT (' + apiKey.substring(0, 10) + '...)' : 'MISSING'}`);
-    
     const productSlug = getProductSlug(productName);
-    console.log(`   📦 Normalized slug: "${productSlug}"`);
     
     // Determine currency from phone number or use forced currency
     let currency = forcedCurrency;
     if (!currency) {
         currency = getCurrencyFromPhone(phoneNumber);
-        console.log(`   💱 Detected currency from phone "${phoneNumber}": ${currency || 'Not detected (will use default)'}`);
-    } else {
-        console.log(`   💱 Using forced currency: ${currency}`);
     }
     
     // Fetch product data from API
-    console.log(`   🌐 Fetching product data from API...`);
     const productData = await fetchProductData(productSlug);
     
     if (!productData) {
-        console.log(`   ❌ No product data found for "${productSlug}"`);
         return null;
     }
     
-    console.log(`   ✅ Product data received, default currency: ${productData.default_currency}`);
-    console.log(`   📊 Product data variations count: ${productData.variations?.length || 0}`);
-    
-    // Debug: Show full product data structure
-    console.log(`   🔍 [DEBUG] Full product data structure:`);
-    console.log(JSON.stringify(productData, null, 2).substring(0, 2000));
-    
     // Parse prices (prefer LLM, fallback to manual)
-    console.log(`   🔧 [PRICE API] Calling parsePriceWithLLM with apiKey: ${!!apiKey}`);
     const priceInfo = await parsePriceWithLLM(productData, currency, apiKey);
-    
-    console.log(`   💰 [DEBUG] Final priceInfo:`, priceInfo ? `currency=${priceInfo.currency}, prices count=${priceInfo.prices?.length || 0}` : 'NULL');
-    if (priceInfo && priceInfo.prices) {
-        console.log(`   💰 [DEBUG] Price details:`, JSON.stringify(priceInfo.prices));
-    }
     
     return priceInfo;
 }

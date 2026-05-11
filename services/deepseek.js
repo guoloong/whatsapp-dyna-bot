@@ -102,7 +102,6 @@ Keywords:`;
         console.log(`Ì†ΩÌ¥ë DeepSeek extracted keywords: "${keywords}"`);
 
         if (!keywords || keywords.split(/\s+/).length === 0 || keywords.length < 3) {
-            console.log('‚ö†Ô∏è Empty or too-short keywords ‚Äì using original message');
             return userMessage;
         }
         return keywords;
@@ -126,7 +125,6 @@ async function httpGetWithRetry(url, options = {}, maxRetries = 3) {
             lastError = err;
             if (attempt < maxRetries) {
                 const delay = 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s
-                console.log(`‚ö†Ô∏è HTTP retry ${attempt}/${maxRetries} for ${url} in ${delay}ms...`);
                 await new Promise(r => setTimeout(r, delay));
             }
         }
@@ -198,7 +196,6 @@ function findLastProductName(text, productNames) {
         if (index > lastIndex) {
             lastIndex = index;
             lastProduct = name;
-            console.log(`    ‚úÖ New best match: "${name}" at index ${index}`);
         }
     }
 
@@ -292,7 +289,6 @@ Response:`;
                 };
             }
         }
-        console.log('‚ö†Ô∏è Invalid JSON from LLM ‚Äì falling back to regex');
         return null;
     } catch (err) {
         console.error('‚ùå Intent detection failed:', err.message);
@@ -416,19 +412,16 @@ async function quickKnowledgeLookup(userMessage, apiKey = null, userId = null, p
             const match2 = lowerMatched.includes(lowerProductName);
             console.log(`   Ì†ΩÌ¥ç Checking "${productName}": includes("${lowerMatched}")=${match1}, "${lowerMatched}".includes="${match2}"`);
             if (match1 || match2) {
-                console.log(`‚úÖ [DEBUG] Found partial match: "${matchedProduct}" ‚Üí "${productName}"`);
                 product = productData;
                 foundPartial = true;
                 break;
             }
         }
         if (!foundPartial) {
-            console.log(`‚ùå [DEBUG] No partial match found for "${matchedProduct}"`);
         }
     }
 
     if (!product) {
-        console.log(`‚ùå [DEBUG] Product "${matchedProduct}" not found in knowledge base`);
         return null;
     }
 
@@ -480,12 +473,9 @@ async function quickKnowledgeLookup(userMessage, apiKey = null, userId = null, p
         const priceInfo = await getProductPrice(matchedProduct, phoneNumberForLookup, apiKey, forcedCurrency);
 
         if (priceInfo) {
-            console.log(`‚úÖ Price fetched from API successfully`);
-            console.log(`   Formatted response preview: "${formatPriceResponse(matchedProduct, priceInfo, forcedCurrency).substring(0, 100)}..."`);
 
             // Check if requested currency was available
             if (forcedCurrency && priceInfo.currency !== forcedCurrency) {
-                console.log(`   ‚ö†Ô∏è Requested currency ${forcedCurrency} not available, used ${priceInfo.currency} instead`);
             }
         }
 
@@ -747,7 +737,6 @@ async function callDeepSeekWithRetry(messages, apiKey, maxRetries = 3) {
             lastError = err;
             if (attempt < maxRetries) {
                 const delay = 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s
-                console.log(`‚ö†Ô∏è Retry ${attempt}/${maxRetries} in ${delay}ms...`);
                 await new Promise(r => setTimeout(r, delay));
             }
         }
@@ -759,10 +748,8 @@ async function callDeepSeekWithRetry(messages, apiKey, maxRetries = 3) {
 // ------------------- Main response generator ---------------------------
 // Returns: { text: string, imageUrl: string|null, productName: string|null }
 async function generateResponse(userMessage, _, apiKey, history = [], userId = null, phoneNumber = null) {
-    console.log(`\n${'='.repeat(60)}`);
     console.log(`Ì†ΩÌ≤¨ NEW QUERY: "${userMessage}"`);
     console.log(`Ì†ΩÌ≥ú History length: ${history.length} messages`);
-    console.log(`${'='.repeat(60)}`);
     console.log(`Ì†ΩÌ≥û Phone number passed to generateResponse: ${phoneNumber || 'NOT PROVIDED'}`);
 
     const kb = getKnowledge();
@@ -806,7 +793,6 @@ async function generateResponse(userMessage, _, apiKey, history = [], userId = n
             intentResult.detectedProduct = intentResult.context.product;
         }
     } else {
-        console.log(`‚ö†Ô∏è [INTENT MANAGER] No userId, using stateless processing`);
     }
     // ==================== END INTENT MANAGER ====================
 
@@ -976,11 +962,8 @@ async function generateResponse(userMessage, _, apiKey, history = [], userId = n
     // ==================== END STORE LOCATOR CHECK ====================
 
     // 1. Direct knowledge lookup (TIER 1)
-    console.log(`\nÌ†ΩÌ≥ö [TIER 1] Checking direct knowledge base...`);
     const directAnswer = await quickKnowledgeLookup(userMessage, apiKey, userId, phoneNumber);
     if (directAnswer) {
-        console.log(`‚úÖ‚úÖ [TIER 1] SUCCESS - Found direct answer`);
-        console.log(`   Answer preview: "${directAnswer.substring(0, 100)}..."`);
         // Try to detect product for image
         const productsInMsg = findAllProductNames(userMessage, productNames);
         const detectedProduct = productsInMsg.length > 0 ? findLastProductName(userMessage, productNames) : null;
@@ -992,16 +975,9 @@ async function generateResponse(userMessage, _, apiKey, history = [], userId = n
         }
 
         const imageUrl = detectedProduct ? getProductImageUrl(kb, detectedProduct) : null;
-        console.log(`${'='.repeat(60)}\n`);
         return { text: directAnswer, imageUrl, productName: detectedProduct };
-    }
-    console.log(`‚ùå [TIER 1] FAILED - No direct match in knowledge base`);
-    console.log(`‚û°Ô∏è Proceeding to AI tier...\n`);
-
-    // 2. AI tier (TIER 1.5 fallback)
     console.log(`Ì†æÌ¥ñ [TIER 1.5] Calling DeepSeek with knowledge base...`);
 
-    // Detect product for brochure inclusion
     let detectedProductForBrochure = null;
     const productsInMsg = findAllProductNames(userMessage, productNames);
     if (productsInMsg.length > 0) {
@@ -1022,9 +998,7 @@ async function generateResponse(userMessage, _, apiKey, history = [], userId = n
     const isUncertain = !reply || unknownPhrases.some(k => reply.toLowerCase().includes(k));
 
     if (isUncertain) {
-        console.log(`‚ùå [TIER 1.5] FAILED - AI uncertain or no response`);
         if (reply) {
-            console.log(`   AI response: "${reply.substring(0, 100)}..."`);
         }
         console.log(`Ì†ΩÌ¥Å Starting fallback cascade...\n`);
 
@@ -1034,23 +1008,19 @@ async function generateResponse(userMessage, _, apiKey, history = [], userId = n
         const productsInCurrent = findAllProductNames(userMessage, productNames);
         if (productsInCurrent.length > 0) {
             detectedProduct = findLastProductName(userMessage, productNames);
-            console.log(`   ‚úÖ Found product in current message: "${detectedProduct}"`);
             console.log(`   Ì†ΩÌ≥¶ All products detected: [${productsInCurrent.join(', ')}]`);
         } else {
-            console.log(`   ‚ö†Ô∏è No product in current message, scanning history...`);
             for (let i = history.length - 1; i >= 0; i--) {
                 if (history[i].role === 'user') {
                     const historyProducts = findAllProductNames(history[i].content, productNames);
                     if (historyProducts.length > 0) {
                         detectedProduct = findLastProductName(history[i].content, productNames);
-                        console.log(`   ‚úÖ Found product in history[${i}]: "${detectedProduct}"`);
                         console.log(`   Ì†ΩÌ≥ú History message: "${history[i].content.substring(0, 50)}..."`);
                         break;
                     }
                 }
             }
             if (!detectedProduct) {
-                console.log(`   ‚ùå No product found in current message or history`);
             }
         }
 
@@ -1066,7 +1036,6 @@ async function generateResponse(userMessage, _, apiKey, history = [], userId = n
                 console.log(`\nÌ†ΩÌ≥Ñ [TIER 2] Fetching product page: ${productUrl}`);
                 const productPageContent = await fetchProductPageAndLinks(productUrl, 3);
                 if (productPageContent) {
-                    console.log(`   ‚úÖ Fetched ${productPageContent.length} chars from product page`);
                     const tier15Prompt = `You are DynaBot. Answer the user based ONLY on the product page content below. Start with YES/NO and one sentence. If answer not found, say exactly "I cannot find the answer on the product page."\nUSER: ${userMessage}\nPRODUCT PAGE CONTENT: ${productPageContent.substring(0, 2500)}`;
                     const tier15Messages = [
                         { role: "system", content: tier15Prompt },
@@ -1079,25 +1048,16 @@ async function generateResponse(userMessage, _, apiKey, history = [], userId = n
                     if (tier15Reply) {
                         const containsCannotFind = tier15Reply.toLowerCase().includes("cannot find the answer on the product page");
                         if (!containsCannotFind) {
-                            console.log(`‚úÖ‚úÖ [TIER 2] SUCCESS - Found answer on product page`);
-                            console.log(`   Response preview: "${tier15Reply.substring(0, 100)}..."`);
-                            console.log(`${'='.repeat(60)}\n`);
                             return { text: tier15Reply, imageUrl, productName: detectedProduct };
                         } else {
-                            console.log(`   ‚ùå [TIER 2] FAILED - AI says cannot find on product page`);
-                            console.log(`   AI response: "${tier15Reply.substring(0, 100)}..."`);
                         }
                     } else {
-                        console.log(`   ‚ùå [TIER 2] FAILED - No response from DeepSeek`);
                     }
                 } else {
-                    console.log(`   ‚ùå [TIER 2] FAILED - Insufficient content from product page`);
                 }
             } else {
-                console.log(`   ‚ö†Ô∏è [TIER 2] SKIPPED - No URL found for product "${detectedProduct}"`);
             }
         } else {
-            console.log(`\n‚è≠Ô∏è [TIER 2] SKIPPED - No product detected`);
         }
 
         // Build search query: DeepSeek keywords + optional product prefix
@@ -1119,7 +1079,6 @@ async function generateResponse(userMessage, _, apiKey, history = [], userId = n
         console.log(`\nÌ†ΩÌ¥é [TIER 3] Searching website: dyna-nutrition.com`);
         const siteResults = await searchWebsite(searchQuery);
         if (siteResults && siteResults.length > 100) {
-            console.log(`   ‚úÖ Found ${siteResults.length} chars of content`);
             const tier2Prompt = `You are DynaBot. Answer the user based ONLY on the search results below. Start with YES/NO and one sentence. If answer not found, say exactly "I cannot find the answer in the search results."\nUSER: ${userMessage}\nRESULTS: ${siteResults.substring(0, 2000)}`;
             const tier2Messages = [
                 { role: "system", content: tier2Prompt },
@@ -1132,26 +1091,18 @@ async function generateResponse(userMessage, _, apiKey, history = [], userId = n
             if (tier2Reply) {
                 const containsCannotFind = tier2Reply.toLowerCase().includes("cannot find the answer");
                 if (!containsCannotFind) {
-                    console.log(`‚úÖ‚úÖ [TIER 3] SUCCESS - Found answer in website search`);
-                    console.log(`   Response preview: "${tier2Reply.substring(0, 100)}..."`);
-                    console.log(`${'='.repeat(60)}\n`);
                     return { text: tier2Reply, imageUrl, productName: detectedProduct };
                 } else {
-                    console.log(`   ‚ùå [TIER 3] FAILED - AI says cannot find in search results`);
-                    console.log(`   AI response: "${tier2Reply.substring(0, 100)}..."`);
                 }
             } else {
-                console.log(`   ‚ùå [TIER 3] FAILED - No response from DeepSeek`);
             }
         } else {
-            console.log(`   ‚ùå [TIER 3] FAILED - No results from website search (${siteResults?.length || 0} chars)`);
         }
 
         // Tier 4: Internet search (DuckDuckGo)
         console.log(`\nÌ†ºÌºê [TIER 4] Searching internet via DuckDuckGo...`);
         const internetResults = await searchInternet(searchQuery);
         if (internetResults) {
-            console.log(`   ‚úÖ Found ${internetResults.length} chars from internet`);
             const tier3Prompt = `You are DynaBot. Answer the user based on these internet search results. Start with YES/NO and one sentence. If not available, say exactly "I cannot find reliable information online."\nUSER: ${userMessage}\nRESULTS: ${internetResults}`;
             const tier3Messages = [
                 { role: "system", content: tier3Prompt },
@@ -1164,24 +1115,14 @@ async function generateResponse(userMessage, _, apiKey, history = [], userId = n
             if (tier3Reply) {
                 const containsCannotFind = tier3Reply.toLowerCase().includes("cannot find reliable");
                 if (!containsCannotFind) {
-                    console.log(`‚úÖ‚úÖ [TIER 4] SUCCESS - Found answer via internet search`);
-                    console.log(`   Response preview: "${tier3Reply.substring(0, 100)}..."`);
-                    console.log(`${'='.repeat(60)}\n`);
                     return { text: tier3Reply, imageUrl, productName: detectedProduct };
                 } else {
-                    console.log(`   ‚ùå [TIER 4] FAILED - AI says cannot find reliable info online`);
-                    console.log(`   AI response: "${tier3Reply.substring(0, 100)}..."`);
                 }
             } else {
-                console.log(`   ‚ùå [TIER 4] FAILED - No response from DeepSeek`);
             }
         } else {
-            console.log(`   ‚ùå [TIER 4] FAILED - No results from DuckDuckGo`);
         }
 
-        console.log(`\n‚ùå‚ùå ALL TIERS FAILED`);
-        console.log(`   Falling back to human representative message`);
-        console.log(`${'='.repeat(60)}\n`);
         return { text: "I'm sorry, I couldn't find an answer. A human representative will be happy to help you.", imageUrl: null, productName: null };
     }
 
@@ -1196,9 +1137,6 @@ async function generateResponse(userMessage, _, apiKey, history = [], userId = n
         trackMentionedProduct(slug);
     }
 
-    console.log(`‚úÖ‚úÖ [TIER 1.5] SUCCESS - AI answered directly`);
-    console.log(`   Response preview: "${reply.substring(0, 100)}..."`);
-    console.log(`${'='.repeat(60)}\n`);
     return { text: reply || "I'm having trouble responding right now.", imageUrl, productName: imageProduct };
 }
 
