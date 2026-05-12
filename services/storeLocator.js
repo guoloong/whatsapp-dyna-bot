@@ -567,9 +567,9 @@ async function findStores(userMessage, apiKey, hasProductContext = false) {
     }
 
     // Step 2.5: Check if location is too broad (big country/region)
-    // If user says "Malaysia" or "KL" or "Johor" without specific area, ask for more specific area
-    // BUT: If user already mentioned a product (like "Where to buy BioNatto in Malaysia"), skip this check
-    if (intent.location && isBigRegion(intent.location) && !hasProductContext) {
+    // If user says "Malaysia" or "KL" without specific area, ask for more specific area
+    // This applies even when user mentioned a product (e.g., "Where to buy BioNatto in Malaysia")
+    if (intent.location && isBigRegion(intent.location)) {
         console.log(`Ì†ΩÌ¥ç [STORE LOCATOR] Location "${intent.location}" is too broad, asking for specific area`);
         return {
             needsLocation: true,
