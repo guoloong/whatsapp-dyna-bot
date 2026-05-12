@@ -328,8 +328,11 @@ function formatPriceResponse(productName, priceInfo, requestedCurrency = null) {
 
     let response = `Here are the prices for *${productName}*:\n\n`;
 
+    // Filter out any subscription plans from prices (items containing "per X weeks", "subscription", etc.)
+    const nonSubscriptionPrices = (priceInfo.prices || []).filter(price => !isSubscriptionPlan(price.option));
+    
     // Sort prices in ascending order by price value
-    const sortedPrices = [...priceInfo.prices].sort((a, b) => a.price - b.price);
+    const sortedPrices = [...nonSubscriptionPrices].sort((a, b) => a.price - b.price);
 
     for (const price of sortedPrices) {
         // Always format price with 2 decimal places
