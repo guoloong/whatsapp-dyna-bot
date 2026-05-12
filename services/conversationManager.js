@@ -8,6 +8,7 @@ const path = require('path');
 
 // Import existing services
 const { getProductPrice, formatPriceResponse } = require('./priceApi');
+const { getRecommendation } = require('./recommendationEngine');
 const { findStores, clearPendingProduct, trackMentionedProduct, getLastMentionedProduct, normalizeProductSlug } = require('./storeLocator');
 const { getKnowledge } = require('./knowledgeLoader');
 const { getSupplementaryInfo } = require('../utils/brochures');
@@ -43,7 +44,7 @@ function loadContexts() {
         if (fs.existsSync(CONTEXT_FILE)) {
             const data = JSON.parse(fs.readFileSync(CONTEXT_FILE, 'utf8'));
             userContexts = new Map(Object.entries(data));
-            console.log(`í ½í³‹ Loaded ${userContexts.size} conversation contexts`);
+            console.log(`ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Loaded ${userContexts.size} conversation contexts`);
         }
     } catch (err) {
         console.error('Context load error:', err.message);
@@ -131,6 +132,21 @@ function detectIntent(userMessage, ctx) {
     const escalationKeywords = ['talk to human', 'speak to human', 'real person', 'agent', 'customer service', 'representative', 'not bot', 'real person'];
     if (escalationKeywords.some(k => lowerMsg.includes(k))) {
         return { intent: 'escalation', confidence: 1.0 };
+    }
+
+    // NEW: Check for implicit recommendation signals (before other intents)
+    const recommendationSignals = [
+        /\b(joint|hair|skin|immune|blood sugar|energy|digestion|sleep|stress)\b.*\b(pain|problem|issue|weak|low|loss|support)\b/i,
+        /\b(want|need|looking for|help with|something for)\b.*\b(hair|skin|joint|immune|health|anti|aging)\b/i,
+        /\b(collagen|vitamin|mineral|supplement|probiotic|zinc|omega)\b.*\b(good|best|help|need|want)\b/i,
+        /\b(prevent|treat|reduce|support|boost|improve)\b.*\b(hair|skin|joint|immune|bone|energy)\b/i,
+        /\b(hair\s*fall|hair\s*loss|hair\s*growth|joint\s*pain|immune\s*system|anti\s*aging)\b/i
+    ];
+
+    for (const pattern of recommendationSignals) {
+        if (pattern.test(lowerMsg)) {
+            return { intent: 'recommendation', confidence: 0.75 };
+        }
     }
 
     // Price check - check BEFORE store locator to catch "price in Malaysia" type queries
@@ -230,9 +246,29 @@ INTENTS:
 - store_locator: ONLY when explicitly asking where to buy/find stores (NOT price queries!)
 - product_info: asking about benefits/ingredients/dosage/info
 - purchase_intent: wanting to buy/order
-- recommendation: asking for suggestions
+- recommendation: asking for suggestions OR mentioning health conditions/needs (e.g., "I have joint pain", "need something for hair loss", "looking for immune support", "what should I take for [issue]")
 - general_inquiry: greeting, thanks, casual
 - escalation: asking for human agent
+
+IMPORTANT: recommendation intent should be triggered when:
+- User explicitly asks for recommendation
+- User mentions health symptoms/conditions (joint pain, hair loss, weak immunity, skin issues, etc.)
+- User describes desired outcomes (anti-aging, better skin, stronger hair)
+- User mentions ingredient interests (collagen, vitamin c, zinc, probiotics)
+
+CONTEXT-AWARE FOLLOW-UP RULES (IMPORTANT):
+When the user says a brief acknowledgment ("yes", "yeah", "sure", "ok", "please", "more", "tell me more", etc.) WITHOUT other specific content:
+1. Check the conversation history and previous bot message
+2. Infer what the user is agreeing to based on context
+3. Set the appropriate intent
+
+Common scenarios:
+- Bot asked "Want to know more?" â†’ User wants product details â†’ intent="product_info"
+- Bot asked "Would you like to check price?" â†’ User wants price â†’ intent="price_check"
+- Bot asked "Interested in where to buy?" â†’ User wants stores â†’ intent="store_locator"
+- Bot asked "Want another option?" â†’ User wants alternative â†’ intent="recommendation"
+
+Return: {intent, action, text, product, location}
 
 ACTION RULES (IMPORTANT):
 1. If intent is price_check, store_locator, OR product_info â†’ ALWAYS use action="execute"
@@ -257,7 +293,12 @@ EXAMPLES:
 - "How about Malaysia?" after price query â†’ {"intent": "price_check", "action": "execute", "product": null, "location": "malaysia"}
 - "How about Singapore?" â†’ {"intent": "price_check", "action": "execute", "product": null, "location": "singapore"}
 - "Where to buy BioNatto?" â†’ {"intent": "store_locator", "action": "execute", "product": "BioNatto", "location": null}
-- "Subang jaya" after store query â†’ {"intent": "store_locator", "action": "execute", "product": null, "location": "subang jaya"}`;
+- "Subang jaya" after store query â†’ {"intent": "store_locator", "action": "execute", "product": null, "location": "subang jaya"}
+- "I have joint pain" â†’ {"intent": "recommendation", "action": "execute", "product": null, "location": null}
+- "my hair is falling out" â†’ {"intent": "recommendation", "action": "execute", "product": null, "location": null}
+- "looking for something with collagen" â†’ {"intent": "recommendation", "action": "execute", "product": null, "location": null}
+- "recommend something for immune support" â†’ {"intent": "recommendation", "action": "execute", "product": null, "location": null}
+- "what should I take for anti-aging?" â†’ {"intent": "recommendation", "action": "execute", "product": null, "location": null}`;
 
     const userPrompt = `History:\n${shortHistory}\n\nCurrent: ${userMessage}\n\nWhat does user want? Return JSON with intent, action (respond/ask/execute/escalate), text (short reply if respond or ask), and product (detected product name or null). Example: {"intent": "product_info", "action": "execute", "product": "GlucoPal"}`;
 
@@ -291,14 +332,14 @@ EXAMPLES:
         if (jsonMatch) {
             try {
                 const result = JSON.parse(jsonMatch[0]);
-                console.log(`í ¾í´– [CONV MANAGER] LLM: intent=${result.intent}, action=${result.action}, product=${result.product}, location=${result.location}`);
+                console.log(`ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ [CONV MANAGER] LLM: intent=${result.intent}, action=${result.action}, product=${result.product}, location=${result.location}`);
 
                 // Force execute for tool-dependent intents
-                const toolIntents = ['price_check', 'store_locator', 'product_info', 'purchase_intent'];
+                const toolIntents = ['price_check', 'store_locator', 'product_info', 'purchase_intent', 'recommendation'];
                 let finalAction = result.action;
                 if (toolIntents.includes(result.intent) && result.action === 'respond') {
                     finalAction = 'execute';
-                    console.log(`í ¾í´– [CONV MANAGER] Forced action=execute for ${result.intent}`);
+                    console.log(`ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ [CONV MANAGER] Forced action=execute for ${result.intent}`);
                 }
 
                 // Use LLM's product/location or fall back to detection
@@ -309,7 +350,7 @@ EXAMPLES:
                 let finalIntent = result.intent;
                 if (!msgProduct && msgLocation && ctx?.currentIntent === 'store_locator') {
                     finalIntent = 'store_locator';
-                    console.log(`í ¾í´– [CONV MANAGER] Follow-up: continuing store_locator with location ${msgLocation}`);
+                    console.log(`ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ [CONV MANAGER] Follow-up: continuing store_locator with location ${msgLocation}`);
                 }
 
                 return {
@@ -358,6 +399,15 @@ function fallbackAnalysis(userMessage, ctx) {
         finalIntent = 'store_locator';
     }
 
+    // Handle "yes" after recommendation (fallback when no LLM)
+    if (ctx?.currentIntent === 'recommendation' && finalIntent === 'general_inquiry') {
+        const lowerMsg = userMessage.toLowerCase();
+        if (/\b(yes|yeah|yep|sure|ok|yup|more|details|tell\s*me\s*more|want\s*to\s*know|interested)\b/.test(lowerMsg)) {
+            finalIntent = 'product_info';
+            console.log(`ðŸ“Œ [CONV MANAGER] Follow-up: detected "yes" after recommendation â†’ product_info`);
+        }
+    }
+
     // Determine missing info
     const missing = [];
     if (finalIntent === 'price_check' && !finalProduct) missing.push('product');
@@ -374,7 +424,7 @@ function fallbackAnalysis(userMessage, ctx) {
 
     const action = missing.length > 0 ? 'ask' : (confidence >= 0.7 ? 'execute' : 'respond');
 
-    console.log(`í ½í´„ [CONV MANAGER] Fallback: intent=${finalIntent}, product=${finalProduct}, location=${finalLocation}, action=${action}, missing=${missing.join(',')}`);
+    console.log(`ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ [CONV MANAGER] Fallback: intent=${finalIntent}, product=${finalProduct}, location=${finalLocation}, action=${action}, missing=${missing.join(',')}`);
 
     return {
         text: null,
@@ -481,12 +531,12 @@ async function executeTool(analysis, userMessage, userId, apiKey, phoneNumber) {
     switch (analysis.intent) {
         case 'price_check':
             if (product) {
-                console.log(`í ½í²° [CONV MANAGER] Calling priceApi.getProductPrice(${product}, ${phoneNumber}, apiKey)`);
+                console.log(`ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ [CONV MANAGER] Calling priceApi.getProductPrice(${product}, ${phoneNumber}, apiKey)`);
 
                 // Detect if user requested a specific currency/location
                 const requestedCurrency = detectRequestedCurrency(userMessage, ctx);
                 if (requestedCurrency) {
-                    console.log(`í ½í²° [CONV MANAGER] User requested currency: ${requestedCurrency}`);
+                    console.log(`ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ [CONV MANAGER] User requested currency: ${requestedCurrency}`);
                 }
 
                 const priceInfo = await getProductPrice(product, phoneNumber, apiKey, requestedCurrency);
@@ -507,7 +557,7 @@ async function executeTool(analysis, userMessage, userId, apiKey, phoneNumber) {
             if (product && location) {
                 // Both product and location - search for stores
                 // hasProductContext=true because user mentioned both product and location
-                console.log(`í ¼í¿ª [CONV MANAGER] Calling storeLocator.findStores("${product} near ${location}", apiKey, true)`);
+                console.log(`ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ [CONV MANAGER] Calling storeLocator.findStores("${product} near ${location}", apiKey, true)`);
                 const result = await findStores(`${product} near ${location}`, apiKey, true);
                 if (typeof result === 'string') {
                     return result;
@@ -533,7 +583,7 @@ async function executeTool(analysis, userMessage, userId, apiKey, phoneNumber) {
 
         case 'product_info':
             if (product) {
-                console.log(`í ½í³‹ [CONV MANAGER] Calling getProductInfoResponse(${product})`);
+                console.log(`ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ [CONV MANAGER] Calling getProductInfoResponse(${product})`);
                 const info = await getProductInfoResponse(product);
                 if (info) {
                     return info;
@@ -549,6 +599,26 @@ async function executeTool(analysis, userMessage, userId, apiKey, phoneNumber) {
             return `What product are you interested in ordering?`;
 
         case 'recommendation':
+            // Use the new LLM-driven recommendation engine
+            const recResponse = await getRecommendation(userMessage, apiKey);
+            if (recResponse) {
+                // Extract product name and text from response (handles both string and object)
+                const recText = typeof recResponse === 'string' ? recResponse : recResponse.text;
+                const recProduct = typeof recResponse === 'object' ? recResponse.productName : null;
+
+                // Store in context for follow-up handling (same pattern as price_check)
+                if (recProduct) {
+                    updateContext(userId, {
+                        currentIntent: 'recommendation',
+                        product: recProduct,
+                        conversationStage: 'post_recommendation'
+                    });
+                    console.log(`ðŸ“Œ [CONV MANAGER] Stored recommendation context: product=${recProduct}`);
+                }
+
+                return recText;
+            }
+            // Fallback if engine returns nothing
             return `I'd love to help! Could you tell me what health concern you're looking to address? For example:\nâ€¢ Joint health\nâ€¢ Blood sugar support\nâ€¢ Skin & beauty\nâ€¢ Immune support`;
 
         case 'escalation':
@@ -568,7 +638,7 @@ async function executeTool(analysis, userMessage, userId, apiKey, phoneNumber) {
 // ==================== Main Processing Function ====================
 
 async function processMessage(userMessage, history, userId, apiKey, phoneNumber) {
-    console.log(`í ½í²¬ [CONV MANAGER] Processing: "${userMessage.substring(0, 50)}..."`);
+    console.log(`ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ [CONV MANAGER] Processing: "${userMessage.substring(0, 50)}..."`);
 
     const ctx = getContext(userId);
 
@@ -592,16 +662,18 @@ async function processMessage(userMessage, history, userId, apiKey, phoneNumber)
     let responseText = analysis.text;
 
     // Safety check: Force execute for tool-dependent intents (even if LLM returned respond)
-    const toolIntents = ['price_check', 'store_locator', 'product_info', 'purchase_intent'];
+    const toolIntents = ['price_check', 'store_locator', 'product_info', 'purchase_intent', 'recommendation'];
     if (toolIntents.includes(analysis.intent)) {
         const hasProduct = analysis.product || ctx?.product;
         const hasLocation = analysis.location || ctx?.location;
         const needsLocation = analysis.intent === 'store_locator';
+        // Recommendation intent doesn't need product/location, so skip the check
+        const needsProduct = analysis.intent !== 'recommendation';
 
         // If we have product (and location if needed), force execute
-        if (hasProduct && (!needsLocation || hasLocation)) {
+        if (!needsProduct || (hasProduct && (!needsLocation || hasLocation))) {
             analysis.action = 'execute';
-            console.log(`í ½í´§ [CONV MANAGER] Safety override: forcing action=execute for ${analysis.intent}`);
+            console.log(`ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ [CONV MANAGER] Safety override: forcing action=execute for ${analysis.intent}`);
         }
     }
 
@@ -637,26 +709,26 @@ async function processMessage(userMessage, history, userId, apiKey, phoneNumber)
 
 I'm here to help you with:
 
-í ¼í¼¿ Product Information - Learn about our supplements including BioNatto Plus, Men Guard, Tricollagen, AshiSlim and more. I'll tell you about benefits, ingredients, recommended dosage, and who they're suitable for.
+ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Product Information - Learn about our supplements including BioNatto Plus, Men Guard, Tricollagen, AshiSlim and more. I'll tell you about benefits, ingredients, recommended dosage, and who they're suitable for.
 
-í ½í²° Pricing
+ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Pricing
 
-í ¼í¿ª Where to Buy - Find the nearest stores, pharmacies, and retailers carrying our products.
+ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Where to Buy - Find the nearest stores, pharmacies, and retailers carrying our products.
 
-í ½í²¡ Recommendations - Not sure which product is right for you? Just tell me your health concern, and I'll suggest suitable options!
+ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Recommendations - Not sure which product is right for you? Just tell me your health concern, and I'll suggest suitable options!
 
-Feel free to ask me anything - whether it's about a specific product, pricing in your country, or where to buy near you. What would you like to know? í ½í¸Š`;
+Feel free to ask me anything - whether it's about a specific product, pricing in your country, or where to buy near you. What would you like to know? ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½`;
         } else if (/\b(thank|thanks)\b/.test(lowerMsg)) {
-            responseText = `You're welcome! It's my pleasure to help! If you have any more questions about our products, pricing, or where to find them, just let me know anytime. Take care! í ½í¸Š`;
+            responseText = `You're welcome! It's my pleasure to help! If you have any more questions about our products, pricing, or where to find them, just let me know anytime. Take care! ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½`;
         } else if (/\b(goodbye|bye|see you)\b/.test(lowerMsg)) {
-            responseText = `Goodbye! It was great chatting with you! Remember, Dyna-Nutrition is here to support your health journey. Feel free to come back anytime you have questions. Take care and stay healthy! í ¼í¼¿`;
+            responseText = `Goodbye! It was great chatting with you! Remember, Dyna-Nutrition is here to support your health journey. Feel free to come back anytime you have questions. Take care and stay healthy! ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½`;
         } else {
             responseText = `I'm here to help! Here's what I can do for you:
 
-í ¼í¼¿ Product Info - Benefits, ingredients, dosage
-í ½í²° Pricing - Latest product price
-í ¼í¿ª Store Locator - Find where to buy near you
-í ½í²¡ Recommendations - Suggest products for your needs
+ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Product Info - Benefits, ingredients, dosage
+ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Pricing - Latest product price
+ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Store Locator - Find where to buy near you
+ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Recommendations - Suggest products for your needs
 
 What would you like to know? Just ask!`;
         }
