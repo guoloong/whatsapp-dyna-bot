@@ -250,6 +250,18 @@ function fallbackIntentDetection(userMessage) {
  * Use LLM to parse raw store data into clean, readable format
  */
 async function parseStoresWithLLM(stores, apiKey) {
+    /* =========================================================================
+     * DISABLED - Going straight to fallback (cleanAddress/cleanPhone)
+     *
+     * The LLM parsing code below is preserved for reference but never executes.
+     * The function now goes directly to the fallback which provides equally
+     * accurate results with instant response time and zero API costs.
+     *
+     * To re-enable: Move the code block below into the main function body
+     * and remove the direct fallback at the bottom.
+     * Recommended timeout if re-enabling: 45-50 seconds minimum
+     * ========================================================================
+
     if (!stores || stores.length === 0) return stores;
 
     // Prepare ALL store data for LLM (no limit)
@@ -326,6 +338,19 @@ ${storeData}`;
             phone: cleanPhone(s.phone || s.raw_phone || '')
         }));
     }
+
+    END OF DISABLED LLM CODE
+    ========================================================================= */
+
+    // PRIMARY PATH: Direct fallback using cleanAddress/cleanPhone
+    // This is now the main implementation - fast, accurate, zero API cost
+    if (!stores || stores.length === 0) return stores;
+
+    return stores.map(s => ({
+        ...s,
+        address: cleanAddress(s.address || s.raw_address || ''),
+        phone: cleanPhone(s.phone || s.raw_phone || '')
+    }));
 }
 
 /**
