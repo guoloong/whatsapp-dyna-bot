@@ -13,6 +13,7 @@ const { findStores, clearPendingProduct, trackMentionedProduct, getLastMentioned
 const { getKnowledge } = require('./knowledgeLoader');
 const { getSupplementaryInfo } = require('../utils/brochures');
 const { getPhoneNumber } = require('../utils/contactCache');
+const { getProductUrl, getProductImageUrl, callDeepSeekWithRetry, searchWebsite, fetchProductPageAndLinks, extractKeywordsWithDeepSeek } = require('./deepseek');
 
 // Context persistence
 const CONTEXT_FILE = path.join(__dirname, '..', 'conversation_context.json');
@@ -283,6 +284,13 @@ SPECIAL RULE FOR RECOMMENDATION CONTEXT:
 - And user says "yes", "yeah", "sure", "ok", "more", "interested" â†’ intent="product_info", action="execute"
 - This is because after recommending a product, user saying "yes" typically means "tell me more about it"
 
+PRODUCT CONTEXT SWITCHING (CRITICAL - when a product is in context):
+- If context shows a product was previously discussed (currentIntent is "recommendation", "product_info", or "purchase_intent")
+  AND user asks "how much?", "price?", "cost?", "rm", "expensive?", "cheap?" â†’ intent="price_check", action="execute", use ctx.product
+- If context shows a product was previously discussed
+  AND user asks "where to buy?", "store?", "pharmacy?", "watsons?", "guardian?", "buy it?", "near me?" â†’ intent="store_locator", action="execute", use ctx.product
+- The product from context should be used automatically - never leave product as null when ctx.product exists
+
 Return: {intent, action, text, product, location}
 
 ACTION RULES (IMPORTANT):
@@ -538,6 +546,21 @@ function detectRequestedCurrency(userMessage, ctx) {
     return null;
 }
 
+// ==================== Helper Functions for Intent Switching ====================
+
+// Check if message is asking about price
+function isPriceQuery(msg) {
+    const lowerMsg = msg.toLowerCase();
+    return /\b(price|cost|how much|money|rm\s|s\$|sgd|expensive|cheap)\b/i.test(lowerMsg);
+}
+
+// Check if message is asking about where to buy/store
+function isStoreQuery(msg) {
+    const lowerMsg = msg.toLowerCase();
+    const storeKeywords = ['where to buy', 'where can i buy', 'where to get', 'buy it', 'store', 'stores', 'shop', 'pharmacy', 'watsons', 'guardian', 'caring', 'retail', 'near me', 'nearby'];
+    return storeKeywords.some(k => lowerMsg.includes(k));
+}
+
 async function executeTool(analysis, userMessage, userId, apiKey, phoneNumber) {
     // Get product and location from analysis OR from context
     const ctx = getContext(userId);
@@ -599,12 +622,76 @@ async function executeTool(analysis, userMessage, userId, apiKey, phoneNumber) {
 
         case 'product_info':
             if (product) {
-                console.log(`ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ [CONV MANAGER] Calling getProductInfoResponse(${product})`);
-                const info = await getProductInfoResponse(product);
-                if (info) {
-                    return info;
+                console.log(`í ½í´µ [CONV MANAGER] Getting product info for: ${product}`);
+
+                // TIER 1: Knowledge Base (JSON + Brochure)
+                //console.log(`   [TIER 1] Checking knowledge base...`);
+                //const info = await getProductInfoResponse(product);
+                //if (info) {
+                //    console.log(`   [TIER 1] âœ… Found in knowledge base`);
+                //    return info;
+                //}
+
+                // TIER 1.5: DeepSeek with knowledge base
+                console.log(`   [TIER 1.5] Calling DeepSeek with knowledge base...`);
+                const kb = getKnowledge();
+                const kbPrompt = buildKnowledgePrompt(product);
+                const tier15Messages = [
+                    { role: "system", content: kbPrompt },
+                    { role: "user", content: `Tell me about ${product}` }
+                ];
+                const tier15Reply = await callDeepSeekWithRetry(tier15Messages, apiKey);
+
+                if (tier15Reply) {
+                    const unknownPhrases = ["don't have", "not in the knowledge", "i don't know", "can't answer", "not sure"];
+                    const isUncertain = unknownPhrases.some(k => tier15Reply.toLowerCase().includes(k));
+
+                    if (!isUncertain) {
+                        console.log(`   [TIER 1.5] âœ… DeepSeek responded successfully`);
+                        return tier15Reply;
+                    }
                 }
-                return `I don't have detailed info for ${product} right now.`;
+
+                // TIER 2: Product page + internal links search
+                console.log(`   [TIER 2] Checking product page...`);
+                const productUrl = getProductUrl(kb, product);
+                if (productUrl) {
+                    const productPageContent = await fetchProductPageAndLinks(productUrl, 3);
+                    if (productPageContent) {
+                        const tier2Prompt = `You are DynaBot. Answer the user based ONLY on the product page content below. If answer not found, say exactly "I cannot find the answer on the product page."\nUSER: Tell me about ${product}\nPRODUCT PAGE CONTENT: ${productPageContent.substring(0, 2500)}`;
+                        const tier2Messages = [
+                            { role: "system", content: tier2Prompt },
+                            { role: "user", content: `Tell me about ${product}` }
+                        ];
+                        const tier2Reply = await callDeepSeekWithRetry(tier2Messages, apiKey);
+
+                        if (tier2Reply && !tier2Reply.toLowerCase().includes("cannot find the answer on the product page")) {
+                            console.log(`   [TIER 2] âœ… Found on product page`);
+                            return tier2Reply;
+                        }
+                    }
+                }
+
+                // TIER 3: Website search
+                console.log(`   [TIER 3] Searching website...`);
+                const searchQuery = `${product} health supplement benefits`;
+                const siteResults = await searchWebsite(searchQuery);
+                if (siteResults && siteResults.length > 100) {
+                    const tier3Prompt = `You are DynaBot. Answer the user based ONLY on the search results below. If answer not found, say exactly "I cannot find the answer in the search results."\nUSER: Tell me about ${product}\nRESULTS: ${siteResults.substring(0, 2000)}`;
+                    const tier3Messages = [
+                        { role: "system", content: tier3Prompt },
+                        { role: "user", content: `Tell me about ${product}` }
+                    ];
+                    const tier3Reply = await callDeepSeekWithRetry(tier3Messages, apiKey);
+
+                    if (tier3Reply && !tier3Reply.toLowerCase().includes("cannot find the answer")) {
+                        console.log(`   [TIER 3] âœ… Found via website search`);
+                        return tier3Reply;
+                    }
+                }
+
+                // Fallback if all tiers fail
+                return `I have basic info for ${product}, but for more detailed information, please visit our website or speak with a consultant.`;
             }
             return `Which product would you like to know about? I have info on BioNatto Plus, GlucoPal, Tricollagen, and more.`;
 
@@ -678,6 +765,26 @@ async function processMessage(userMessage, history, userId, apiKey, phoneNumber)
         analysis.intent = 'product_info';
         analysis.action = 'execute';
         analysis.product = ctx.product; // Ensure product is set from context
+    }
+
+    // ==================== Intent Switching for Price/Store Follow-ups ====================
+    // When context has a product (from recommendation or product_info) AND user asks about price/store
+    // We need to switch the intent to price_check or store_locator
+
+    // 1. Switch to price_check if context has product AND user asks about price
+    if (ctx?.product && isPriceQuery(userMessage) && analysis.intent !== 'price_check') {
+        console.log(`í ½í´„ [CONV MANAGER] Context has product (${ctx.product}) + price query â†’ switching to price_check`);
+        analysis.intent = 'price_check';
+        analysis.action = 'execute';
+        analysis.product = ctx.product; // Use product from context
+    }
+
+    // 2. Switch to store_locator if context has product AND user asks where to buy
+    if (ctx?.product && isStoreQuery(userMessage) && analysis.intent !== 'store_locator') {
+        console.log(`í ½í´„ [CONV MANAGER] Context has product (${ctx.product}) + store query â†’ switching to store_locator`);
+        analysis.intent = 'store_locator';
+        analysis.action = 'execute';
+        analysis.product = ctx.product; // Use product from context
     }
 
     // Step 2: Update context

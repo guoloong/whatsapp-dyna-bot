@@ -3,29 +3,137 @@ const axios = require('axios');
 
 const API_BASE_URL = 'https://www.dyna-nutrition.com/wp-json/woo-country-price/v1';
 
-// Product slug normalization (same as in deepseek.js)
+// Product slug normalization - verified against API
+// Real slugs from: https://www.dyna-nutrition.com/wp-json/woo-country-price/v1/product-slugs
 const PRODUCT_SLUG_MAP = {
+    // BioNatto
+    'BioNatto': 'bionatto',
     'BioNatto Plus': 'bionatto',
+    'bionatto': 'bionatto',
+
+    // Men Guard
     'Men Guard': 'men-guard-capsule',
     'Men Guard Capsule': 'men-guard-capsule',
+    'MenGuard': 'men-guard-capsule',
+    'MenGuard Capsule': 'men-guard-capsule',
+    'men guard': 'men-guard-capsule',
+
+    // Ashislim
     'Ashislim': 'ashislim',
+    'AshiSlim': 'ashislim',
+    'ashi slim': 'ashislim',
+
+    // Black Elderberry Juice
     'Black Elderberry Juice': 'black-elderberry-juice',
+    'Black Elderberry': 'black-elderberry-juice',
+    'elderberry': 'black-elderberry-juice',
+
+    // Elderola
     'Elderola': 'elderola',
+
+    // Glucopal
     'Glucopal': 'glucopal',
+    'GlucoPal': 'glucopal',
+
+    // Hairegain
     'Hairegain': 'hairegain',
+    'HairGain': 'hairegain',
+    'Hair Regain': 'hairegain',
+
+    // HP-Floragut
     'HP-Floragut': 'hp-floragut',
+    'HP Floragut': 'hp-floragut',
+    'Floragut': 'hp-floragut',
+    'FloraGut': 'hp-floragut',
+    'HPF loragut': 'hp-floragut',
+    'floragut': 'hp-floragut',
+    'flora gut': 'hp-floragut',
+
+    // Liveprotein
     'Liveprotein': 'liveprotein',
+    'Live Protein': 'liveprotein',
+
+    // Marinecal Plus
     'Marinecal Plus': 'marinecal-plus',
+    'Marine Cal Plus': 'marinecal-plus',
+
+    // Nustem
     'Nustem': 'nustem',
-    'Optiberries': 'optiberries',
+
+    // Optiberries
+    'Optiberries': 'optiberries-chewable',
+    'Optiberries Chewable': 'optiberries-chewable',
+
+    // Optivue
     'Optivue': 'optivue',
-    'Organic Ashitaba': 'organic-ashitaba',
+
+    // Organic Ashitaba
+    'Organic Ashitaba': 'ashitaba',
+    'Ashitaba': 'ashitaba',
+
+    // Super Bio Organic
     'Super Bio Organic': 'super-bio-organic',
+
+    // Tibetan Seaberry
     'Tibetan Seaberry': 'tibetan-seaberry',
+    'Sea Berry': 'tibetan-seaberry',
+    'Seaberry': 'tibetan-seaberry',
+
+    // Tricollagen
     'Tricollagen': 'tricollagen',
+    'TriCollagen': 'tricollagen',
+
+    // Uri Comfort
     'Uri Comfort': 'uri-comfort',
+
+    // Vitamune CDZ
     'Vitamune CDZ': 'vitamune-cdz',
-    'Riflex 360': 'riflex-360'
+    'Vitamune': 'vitamune-cdz',
+
+    // Riflex 360
+    'Riflex 360': 'vitalguard-riflex-360-capsule',
+    'Riflex360': 'vitalguard-riflex-360-capsule',
+    'Riflex': 'vitalguard-riflex-360-capsule',
+
+    // Barleygrass
+    'Barleygrass': 'organic-volcanic-barley-grass-juice-powder',
+    'Barley Grass': 'organic-volcanic-barley-grass-juice-powder',
+
+    // Wheatgrass
+    'Wheatgrass': 'organic-volcanic-wheatgrass-juice-powder',
+    'Wheat Grass': 'organic-volcanic-wheatgrass-juice-powder',
+
+    // Premium Organic Beetroot Juice
+    'Premium Organic Beetroot Juice': 'premium-organic-red-beet',
+    'Beetroot Juice': 'premium-organic-red-beet',
+    'Organic Beetroot': 'premium-organic-red-beet',
+
+    // Reswell
+    'Reswell': 'reswell-capsule',
+    'Reswell Capsule': 'reswell-capsule',
+
+    // Triple Green
+    'Triple Green': 'organic-volcanic-triple-green',
+
+    // MenGuard (alternate)
+    'Menguard': 'men-guard-capsule',
+    'Men Guard Capsule': 'men-guard-capsule',
+
+    // Nitrovar
+    'Nitrovar': 'nitrovar',
+    'Nitrovar Plus': 'nitrovar',
+
+    // Liveberries
+    'Liveberries': 'liveberries',
+    'Live Berries': 'liveberries',
+
+    // Liveessence
+    'Liveessence': 'liveessence',
+    'Live Essence': 'liveessence',
+
+    // Livezymes
+    'Livezymes': 'livezymes',
+    'Live Zymes': 'livezymes',
 };
 
 // Country code to phone prefix mapping
@@ -62,15 +170,33 @@ const PREFIX_TO_CURRENCY = {
 
 // Get product slug from product name
 function getProductSlug(productName) {
+    if (!productName) return null;
+
+    // 1. Check exact match first
     const mapped = PRODUCT_SLUG_MAP[productName];
     if (mapped) return mapped;
-    // Smart stripping - but keep "capsule" for Men Guard since API uses it
+
+    // 2. Check case-insensitive match
     const lowerName = productName.toLowerCase();
+    const lowerMapped = PRODUCT_SLUG_MAP[lowerName];
+    if (lowerMapped) return lowerMapped;
+
+    // 3. Smart fallback stripping
     if (lowerName.includes('men guard')) {
         return 'men-guard-capsule';
     }
+    if (lowerName.includes('reswell')) {
+        return 'reswell-capsule';
+    }
+    if (lowerName.includes('riflex')) {
+        return 'vitalguard-riflex-360-capsule';
+    }
+    if (lowerName.includes('optiberries')) {
+        return 'optiberries-chewable';
+    }
+
     return lowerName
-        .replace(/\s*(plus|capsules|tablet|softgel)\s*/gi, '')
+        .replace(/\s*(plus|capsules?|tablet|softgel|chewable)\s*/gi, '')
         .replace(/\s+/g, '-')
         .replace(/[^a-z0-9\-]/g, '');
 }
