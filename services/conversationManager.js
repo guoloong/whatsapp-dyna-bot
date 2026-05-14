@@ -13,7 +13,8 @@ const { findStores, clearPendingProduct, trackMentionedProduct, getLastMentioned
 const { getKnowledge } = require('./knowledgeLoader');
 const { getSupplementaryInfo } = require('../utils/brochures');
 const { getPhoneNumber } = require('../utils/contactCache');
-const { getProductUrl, getProductImageUrl, callDeepSeekWithRetry, searchWebsite, fetchProductPageAndLinks, extractKeywordsWithDeepSeek } = require('./deepseek');
+const { getProductUrl, getProductImageUrl, buildKnowledgePrompt } = require('./deepseek');
+const { callDeepSeekWithRetry, searchWebsite, fetchProductPageAndLinks, extractKeywordsWithDeepSeek } = require('../utils/llmHelpers');
 
 // Context persistence
 const CONTEXT_FILE = path.join(__dirname, '..', 'conversation_context.json');
@@ -217,9 +218,10 @@ async function analyzeWithLLM(userMessage, history, userId, apiKey) {
         `Intent: ${ctx.currentIntent || 'none'}, Product: ${ctx.product || 'none'}, Location: ${ctx.location || 'none'}, Stage: ${ctx.conversationStage || 'start'}` :
         'New conversation';
 
-    // Short history (last 3 messages max)
-    const shortHistory = history.slice(-3).map(m =>
-        `${m.role === 'assistant' ? 'Bot' : 'User'}: ${m.content.substring(0, 100)}`
+    // Short history (last 3 messages max) - ensure history is an array
+    const historyArray = Array.isArray(history) ? history : [];
+    const shortHistory = historyArray.slice(-3).map(m =>
+        `${m.role === 'assistant' ? 'Bot' : 'User'}: ${(m.content || '').substring(0, 100)}`
     ).join('\n') || 'No previous messages';
 
     // Check if product is in context - if so, always use execute
@@ -428,7 +430,7 @@ function fallbackAnalysis(userMessage, ctx) {
         const lowerMsg = userMessage.toLowerCase();
         if (/\b(yes|yeah|yep|sure|ok|yup|more|details|tell\s*me\s*more|want\s*to\s*know|interested)\b/.test(lowerMsg)) {
             finalIntent = 'product_info';
-            console.log(`í ½í³Œ [CONV MANAGER] Follow-up: detected "yes" after recommendation â†’ product_info`);
+            console.log(`[CONV MANAGER] Follow-up: detected "yes" after recommendation â†’ product_info`);
         }
     }
 
@@ -622,7 +624,7 @@ async function executeTool(analysis, userMessage, userId, apiKey, phoneNumber) {
 
         case 'product_info':
             if (product) {
-                console.log(`í ½í´µ [CONV MANAGER] Getting product info for: ${product}`);
+                console.log(`[CONV MANAGER] Getting product info for: ${product}`);
 
                 // TIER 1: Knowledge Base (JSON + Brochure)
                 //console.log(`   [TIER 1] Checking knowledge base...`);
@@ -716,7 +718,7 @@ async function executeTool(analysis, userMessage, userId, apiKey, phoneNumber) {
                         product: recProduct,
                         conversationStage: 'post_recommendation'
                     });
-                    console.log(`í ½í³Œ [CONV MANAGER] Stored recommendation context: product=${recProduct}`);
+                    console.log(`[CONV MANAGER] Stored recommendation context: product=${recProduct}`);
                 }
 
                 return recText;
@@ -761,7 +763,7 @@ async function processMessage(userMessage, history, userId, apiKey, phoneNumber)
     // If previous was recommendation AND context has a product AND user just said "Yes" (or similar)
     // AND LLM returned recommendation (not product_info), switch to product_info
     if (ctx?.currentIntent === 'recommendation' && ctx?.product && isSimpleAck && analysis.intent !== 'product_info') {
-        console.log(`í ½í³Œ [CONV MANAGER] Post-LLM Follow-up: "Yes" after recommendation â†’ switching to product_info for ${ctx.product}`);
+        console.log(`[CONV MANAGER] Post-LLM Follow-up: "Yes" after recommendation â†’ switching to product_info for ${ctx.product}`);
         analysis.intent = 'product_info';
         analysis.action = 'execute';
         analysis.product = ctx.product; // Ensure product is set from context
@@ -921,6 +923,7 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 module.exports = {
+    generateResponse: processMessage, // Alias for backward compatibility with whatsappBot.js
     processMessage,
     analyzeIntentWithLLM,
     getContext,

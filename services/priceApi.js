@@ -134,6 +134,13 @@ const PRODUCT_SLUG_MAP = {
     // Livezymes
     'Livezymes': 'livezymes',
     'Live Zymes': 'livezymes',
+
+
+    // Bone Builder Bundle
+    'Bone Builder': 'bone-builder-bundle',
+
+    // Liver Detox Bundle
+    'Liver Detox': 'liver-detoxification-bundle',
 };
 
 // Country code to phone prefix mapping

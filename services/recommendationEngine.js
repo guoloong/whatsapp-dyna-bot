@@ -4,8 +4,10 @@
 
 const axios = require('axios');
 
-// Import knowledge base and brochure functions from deepseek.js
-const { buildKnowledgePrompt, callDeepSeekWithRetry } = require('./deepseek');
+// Import from deepseek.js (knowledge prompts only)
+const { buildKnowledgePrompt } = require('./deepseek');
+// Import LLM helpers from utils (avoids circular dependency)
+const { callDeepSeekWithRetry } = require('../utils/llmHelpers');
 
 // Intent detection prompt
 const INTENT_DETECTION_PROMPT = `You are DynaBot, a health supplement expert for Dyna-Nutrition.
