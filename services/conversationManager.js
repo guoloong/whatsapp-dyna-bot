@@ -236,43 +236,41 @@ async function analyzeWithLLM(userMessage, history, userId, apiKey) {
     const msgProductStr = msgProduct ? `User mentioned product: ${msgProduct}` : 'No product in message';
     const msgLocationStr = msgLocation ? `User mentioned location: ${msgLocation}` : 'No location in message';
 
+    // Build ingredient context for ctx.product (helps LLM match ingredients to products)
+    let ingredientContext = '';
+    if (ctx?.product) {
+        const kb = getKnowledge();
+        const product = kb.products?.[ctx.product];
+        if (product?.ingredients) {
+            ingredientContext = `\nContext product ingredients: ${product.ingredients.join(', ')}`;
+        }
+    }
+
     // Detect if this is a follow-up to a previous query
     const isFollowUp = ctx?.currentIntent && ctx?.currentIntent !== 'general_inquiry' && ctx?.currentIntent !== 'start';
     const followUpHint = isFollowUp ? `Previous intent was: ${ctx.currentIntent}` : '';
 
-    // IMPORTANT: Special follow-up detection for recommendation context
-    // When ctx.currentIntent = "recommendation" AND product is in context (e.g., BioNatto Plus),
+    // IMPORTANT: Special follow-up detection for product context
+    // When ctx.currentIntent = "recommendation" OR "product_info" AND product is in context,
     // AND user says a simple acknowledgment word (yes, yeah, sure, ok, more, interested),
-    // this means user wants MORE INFO about the previously recommended product
+    // this means user wants MORE INFO about the previously discussed product
     let recommendationFollowUpHint = '';
-    if (ctx?.currentIntent === 'recommendation' && ctx?.product) {
-        recommendationFollowUpHint = `CRITICAL: Context shows a product (${ctx.product}) was just recommended. User said: "${userMessage}". If this is an acknowledgment word → they want product INFO → intent="product_info", action="execute", product="${ctx.product}"`;
+    if ((ctx?.currentIntent === 'recommendation' || ctx?.currentIntent === 'product_info') && ctx?.product) {
+        recommendationFollowUpHint = `CRITICAL: Context shows currentIntent="${ctx.currentIntent}" and product (${ctx.product}) was recently discussed. User said: "${userMessage}". If this is an acknowledgment word → they want product INFO → intent="product_info", action="execute", product="${ctx.product}"`;
     }
 
-    const systemPrompt = `You are DynaBot, a health supplement assistant for Dyna-Nutrition.
+    const systemPrompt = `You are DynaBot, a helpful AI nutritionist for Dynamic Nutrition. 
 
 Decide what the user wants and what action to take.
 
 INTENTS:
 - price_check: asking about price/cost/money (NOT store locations!)
 - store_locator: ONLY when explicitly asking where to buy/find stores (NOT price queries!)
-- product_info: asking about benefits/ingredients/dosage/info (including follow-up questions!)
+- product_info: asking about benefits/ingredients/dosage/info
 - purchase_intent: wanting to buy/order
 - recommendation: asking for suggestions OR mentioning health conditions/needs (e.g., "I have joint pain", "need something for hair loss", "looking for immune support", "what should I take for [issue]")
 - general_inquiry: greeting, thanks, casual
 - escalation: asking for human agent
-
-IMPORTANT FOLLOW-UP QUESTION DETECTION:
-When a product is mentioned or is in context, these types of questions should be treated as product_info:
-- "how does [ingredient] work?" or "what does [ingredient] do?"
-- "how to take it?" or "dosage?" or "when should I take it?"
-- "is it suitable for [condition]?" or "can I take it if I have [condition]?" or "who can take it?"
-- "what are the side effects?" or "any precautions?"
-- "how does it work?" or "what are the benefits?"
-- Any question starting with "what", "how", "can I", "is it", "who" about the product in context
-
-CRITICAL: If product is in context, ALWAYS include it in the response:
-- If user asks a follow-up question and product=${ctx?.product || "product_name"} is in context → intent="product_info", action="execute", product="${ctx?.product || "product_name"}"
 
 IMPORTANT: recommendation intent should be triggered when:
 - User explicitly asks for recommendation
@@ -293,10 +291,10 @@ Common scenarios:
 - Bot asked "Interested in where to buy?" → User wants stores → intent="store_locator"
 - Bot asked "Want another option?" → User wants alternative → intent="recommendation"
 
-SPECIAL RULE FOR RECOMMENDATION CONTEXT:
-- If context shows currentIntent="recommendation" AND a product was mentioned (e.g., ${ctx?.product || "BioNatto Plus"})
+SPECIAL RULE FOR PRODUCT CONTEXT:
+- If context shows currentIntent="recommendation" OR "product_info" AND a product was mentioned (e.g., ${ctx?.product || "BioNatto Plus"})
 - And user says "yes", "yeah", "sure", "ok", "more", "interested" → intent="product_info", action="execute"
-- This is because after recommending a product, user saying "yes" typically means "tell me more about it"
+- This is because after discussing a product, user saying "yes" typically means "tell me more about it"
 
 PRODUCT CONTEXT SWITCHING (CRITICAL - when a product is in context):
 - If context shows a product was previously discussed (currentIntent is "recommendation", "product_info", or "purchase_intent")
@@ -304,6 +302,55 @@ PRODUCT CONTEXT SWITCHING (CRITICAL - when a product is in context):
 - If context shows a product was previously discussed
   AND user asks "where to buy?", "store?", "pharmacy?", "watsons?", "guardian?", "buy it?", "near me?" → intent="store_locator", action="execute", use ctx.product
 - The product from context should be used automatically - never leave product as null when ctx.product exists
+
+FOLLOW-UP QUESTION RESOLUTION (CRITICAL - MUST FOLLOW):
+When ctx.product exists, you MUST treat the following types of questions as being about ctx.product:
+
+1. INGREDIENT QUESTIONS - User mentions an ingredient name:
+   - "How does Nattokinase work?" → product=ctx.product (even if Nattokinase not in current message)
+   - "What is Glutathione?" → product=ctx.product (Glutathione is in TriCollagen)
+   - "Tell me about Grape Seed Extract" → product=ctx.product
+   → ALWAYS map ingredient names to the product in context
+
+2. SUITABILITY QUESTIONS - User asks about health conditions:
+   - "Is it suitable for pregnant women?" → product=ctx.product
+   - "Can I take it with blood thinners?" → product=ctx.product
+   - "Is this good for people with diabetes?" → product=ctx.product
+   - "What about breastfeeding mothers?" → product=ctx.product
+   - "Is it safe for kids?" → product=ctx.product
+   - "Can someone with high blood pressure take this?" → product=ctx.product
+   → ANY health condition question with ctx.product → use ctx.product
+
+3. PRONOUN RESOLUTION - "it", "this", "that" + a question:
+   - "What is it?" → product=ctx.product
+   - "Is this suitable for me?" → product=ctx.product
+   - "Can I take that?" → product=ctx.product
+   - "How much is it?" → product=ctx.product
+   - "Does it have side effects?" → product=ctx.product
+   → These always refer to ctx.product when it exists
+
+4. IMPLICIT PRODUCT QUESTIONS - Generic question after product discussion:
+   - "What are the side effects?" → product=ctx.product
+   - "Any contraindications?" → product=ctx.product
+   - "How long to see results?" → product=ctx.product
+   - "What does it contain?" → product=ctx.product
+   → Any generic question about a product attribute → use ctx.product
+
+EXAMPLES OF FOLLOW-UP RESOLUTION:
+- Context: ctx.product="BioNatto Plus" (has Nattokinase, Pine Bark, Grape Seed)
+  - "How does Nattokinase work?" → product="BioNatto Plus"
+  - "Is it safe for blood thinners?" → product="BioNatto Plus"
+  - "Can pregnant women take it?" → product="BioNatto Plus"
+
+- Context: ctx.product="TriCollagen" (has Collagen Tripeptide, Glutathione, Sea Buckthorn)
+  - "What is Glutathione?" → product="TriCollagen"
+  - "Is it suitable for yeast allergy?" → product="TriCollagen"
+  - "What about for nursing mothers?" → product="TriCollagen"
+
+- Context: ctx.product="GlucoPal"
+  - "How does it work?" → product="GlucoPal"
+  - "Is this good for pre-diabetes?" → product="GlucoPal"
+  - "Any side effects?" → product="GlucoPal"
 
 Return: {intent, action, text, product, location}
 
@@ -313,7 +360,7 @@ ACTION RULES (IMPORTANT):
 3. Only use action="respond" for general_inquiry, escalation, or when truly done
 4. NEVER use action="respond" for intents that need external data (prices, stores, product info)
 
-Context: ${contextStr}${toolContextStr}${toolContextStr2}
+Context: ${contextStr}${toolContextStr}${toolContextStr2}${ingredientContext}
 ${msgProductStr}
 ${msgLocationStr}
 ${followUpHint}
@@ -336,7 +383,15 @@ EXAMPLES:
 - "my hair is falling out" → {"intent": "recommendation", "action": "execute", "product": null, "location": null}
 - "looking for something with collagen" → {"intent": "recommendation", "action": "execute", "product": null, "location": null}
 - "recommend something for immune support" → {"intent": "recommendation", "action": "execute", "product": null, "location": null}
-- "what should I take for anti-aging?" → {"intent": "recommendation", "action": "execute", "product": null, "location": null}`;
+- "what should I take for anti-aging?" → {"intent": "recommendation", "action": "execute", "product": null, "location": null}
+
+FOLLOW-UP EXAMPLES (ctx.product exists):
+- "How does Nattokinase work?" (ctx: BioNatto Plus) → {"intent": "product_info", "action": "execute", "product": "BioNatto Plus"}
+- "Is it suitable for pregnant women?" (ctx: GlucoPal) → {"intent": "product_info", "action": "execute", "product": "GlucoPal"}
+- "Can I take it with blood thinners?" (ctx: BioNatto Plus) → {"intent": "product_info", "action": "execute", "product": "BioNatto Plus"}
+- "What is Glutathione?" (ctx: TriCollagen) → {"intent": "product_info", "action": "execute", "product": "TriCollagen"}
+- "Is this good for diabetes?" (ctx: GlucoPal) → {"intent": "product_info", "action": "execute", "product": "GlucoPal"}
+- "Can kids take it?" (ctx: Vitamune CDZ) → {"intent": "product_info", "action": "execute", "product": "Vitamune CDZ"}`;
 
     const userPrompt = `History:\n${shortHistory}\n\nCurrent: ${userMessage}\n\nWhat does user want? Return JSON with intent, action (respond/ask/execute/escalate), text (short reply if respond or ask), and product (detected product name or null). Example: {"intent": "product_info", "action": "execute", "product": "GlucoPal"}`;
 
@@ -575,7 +630,7 @@ function isStoreQuery(msg) {
     return storeKeywords.some(k => lowerMsg.includes(k));
 }
 
-async function executeTool(analysis, userMessage, userId, apiKey, phoneNumber) {
+async function executeTool(analysis, userMessage, history, userId, apiKey, phoneNumber) {
     // Get product and location from analysis OR from context
     const ctx = getContext(userId);
     const product = analysis.product || ctx?.product;
@@ -638,20 +693,29 @@ async function executeTool(analysis, userMessage, userId, apiKey, phoneNumber) {
             if (product) {
                 console.log(`[CONV MANAGER] Getting product info for: ${product}`);
 
-                // Check if this is a follow-up question about the product already in context
-                const ctx = getContext(userId);
-                const isFollowUpQuestion = ctx?.product === product && ctx?.currentIntent === 'product_info' && ctx?.turnsOnTopic > 1;
+                // TIER 1: Knowledge Base (JSON + Brochure)
+                //console.log(`   [TIER 1] Checking knowledge base...`);
+                //const info = await getProductInfoResponse(product);
+                //if (info) {
+                //    console.log(`   [TIER 1] ✅ Found in knowledge base`);
+                //    return info;
+                //}
 
-                // Use actual user question for follow-ups, or generic "Tell me about" for new product queries
-                const userQuestion = isFollowUpQuestion ? userMessage : `Tell me about ${product}`;
-
-                // TIER 1.5: DeepSeek with knowledge base - use actual user question
+                // TIER 1.5: DeepSeek with knowledge base
                 console.log(`   [TIER 1.5] Calling DeepSeek with knowledge base...`);
                 const kb = getKnowledge();
                 const kbPrompt = buildKnowledgePrompt(product);
+
+                // Build comprehensive user prompt - give all info upfront, no questions
+                const ctx = getContext(userId);
+                const currentProduct = product || ctx?.product;
+                const userPrompt = `Tell me about ${currentProduct || product}.
+IMPORTANT: Provide comprehensive information including key benefits, ingredients, dosage, and suitability in ONE response.
+Do NOT end with a question. End with a statement like "Let me know if you need pricing or store locations."`;
+
                 const tier15Messages = [
                     { role: "system", content: kbPrompt },
-                    { role: "user", content: userQuestion }
+                    { role: "user", content: userPrompt }
                 ];
                 const tier15Reply = await callDeepSeekWithRetry(tier15Messages, apiKey);
 
@@ -671,10 +735,10 @@ async function executeTool(analysis, userMessage, userId, apiKey, phoneNumber) {
                 if (productUrl) {
                     const productPageContent = await fetchProductPageAndLinks(productUrl, 3);
                     if (productPageContent) {
-                        const tier2Prompt = `You are DynaBot. Answer the user based ONLY on the product page content below. If answer not found, say exactly "I cannot find the answer on the product page."\nUSER: ${userQuestion}\nPRODUCT PAGE CONTENT: ${productPageContent.substring(0, 2500)}`;
+                        const tier2Prompt = `You are DynaBot. Answer the user based ONLY on the product page content below. If answer not found, say exactly "I cannot find the answer on the product page."\nUSER: Tell me about ${product}\nPRODUCT PAGE CONTENT: ${productPageContent.substring(0, 2500)}`;
                         const tier2Messages = [
                             { role: "system", content: tier2Prompt },
-                            { role: "user", content: userQuestion }
+                            { role: "user", content: `Tell me about ${product}` }
                         ];
                         const tier2Reply = await callDeepSeekWithRetry(tier2Messages, apiKey);
 
@@ -687,13 +751,13 @@ async function executeTool(analysis, userMessage, userId, apiKey, phoneNumber) {
 
                 // TIER 3: Website search
                 console.log(`   [TIER 3] Searching website...`);
-                const searchQuery = isFollowUpQuestion ? userMessage : `${product} health supplement benefits`;
+                const searchQuery = `${product} health supplement benefits`;
                 const siteResults = await searchWebsite(searchQuery);
                 if (siteResults && siteResults.length > 100) {
-                    const tier3Prompt = `You are DynaBot. Answer the user based ONLY on the search results below. If answer not found, say exactly "I cannot find the answer in the search results."\nUSER: ${userQuestion}\nRESULTS: ${siteResults.substring(0, 2000)}`;
+                    const tier3Prompt = `You are DynaBot. Answer the user based ONLY on the search results below. If answer not found, say exactly "I cannot find the answer in the search results."\nUSER: Tell me about ${product}\nRESULTS: ${siteResults.substring(0, 2000)}`;
                     const tier3Messages = [
                         { role: "system", content: tier3Prompt },
-                        { role: "user", content: userQuestion }
+                        { role: "user", content: `Tell me about ${product}` }
                     ];
                     const tier3Reply = await callDeepSeekWithRetry(tier3Messages, apiKey);
 
@@ -766,15 +830,16 @@ async function processMessage(userMessage, history, userId, apiKey, phoneNumber)
     if (!analysis.location && ctx?.location) analysis.location = ctx.location;
 
     // ==================== Post-LLM Follow-Up Detection (Fallback) ====================
-    // Check if user gave a simple acknowledgment ("yes", "yeah", etc.) after recommendation
+    // Check if user gave a simple acknowledgment ("yes", "yeah", etc.) after recommendation or product_info
     // This is a fallback in case the LLM didn't detect the follow-up pattern
     const lowerMsg = userMessage.toLowerCase().trim();
     const isSimpleAck = /^(yes|yeah|yep|sure|ok|yup|more|details|tell\s*me\s*more|interested|yes\s+(please|do|tell))$/i.test(lowerMsg);
 
-    // If previous was recommendation AND context has a product AND user just said "Yes" (or similar)
-    // AND LLM returned recommendation (not product_info), switch to product_info
-    if (ctx?.currentIntent === 'recommendation' && ctx?.product && isSimpleAck && analysis.intent !== 'product_info') {
-        console.log(`[CONV MANAGER] Post-LLM Follow-up: "Yes" after recommendation → switching to product_info for ${ctx.product}`);
+    // If previous was recommendation OR product_info AND context has a product AND user just said "Yes" (or similar)
+    // AND LLM didn't return product_info, switch to product_info
+    const isProductContext = ctx?.currentIntent === 'recommendation' || ctx?.currentIntent === 'product_info';
+    if (isProductContext && ctx?.product && isSimpleAck && analysis.intent !== 'product_info') {
+        console.log(`[CONV MANAGER] Post-LLM Follow-up: "Yes" after ${ctx.currentIntent} → switching to product_info for ${ctx.product}`);
         analysis.intent = 'product_info';
         analysis.action = 'execute';
         analysis.product = ctx.product; // Ensure product is set from context
@@ -840,7 +905,7 @@ async function processMessage(userMessage, history, userId, apiKey, phoneNumber)
 
     // If action is execute, run the tool
     if (analysis.action === 'execute') {
-        const toolResult = await executeTool(analysis, userMessage, userId, apiKey, phoneNumber);
+        const toolResult = await executeTool(analysis, userMessage, history, userId, apiKey, phoneNumber);
         if (toolResult) {
             responseText = toolResult;
         }

@@ -188,7 +188,7 @@ async function searchInternet(query) {
 
 function buildKnowledgePrompt(detectedProduct = null) {
     const kb = getKnowledge();
-    let prompt = `You are DynaBot, the friendly assistant for Dyna-Nutrition.\n\n`;
+    let prompt = `You are DynaBot, a helpful AI nutritionist for Dynamic Nutrition.\n\n`;
     for (const [name, product] of Object.entries(kb.products)) {
         prompt += `## ${name}\n`;
         if (typeof product === 'object') {
@@ -230,7 +230,20 @@ When users ask about where to buy products or store locations:
 3. Support common Malaysia/Singapore areas: KL, PJ, Subang Jaya, Shah Alam, Penang, Johor, Singapore, etc.
 4. Once location is provided, the system will find nearest stores`;
 
-    prompt += `\n${guidelinesRaw}\n${storeLocatorGuidelines}`;
+    const acknowledgmentGuidelines = `ACKNOWLEDGMENT HANDLING:
+When the user's message is an acknowledgment (yes, yeah, sure, ok, etc.) AND you receive context about the previous response:
+1. Infer what the user is agreeing to from the "Previous response" text
+2. If previous response offered choices (e.g., "more details or where to buy"), pick the first option or provide more details
+3. If previous response was product info, provide MORE details (dosage, ingredients, side effects, suitability)
+4. If previous response asked a question, answer it positively
+5. NEVER ask "what do you mean" or "could you clarify" - always interpret the acknowledgment in context
+
+Examples:
+- "Yes" after "Want to know more about RiFlex?" â†’ Provide detailed product info
+- "Yes" after "More details or where to buy?" â†’ Provide more details about the product (ingredients, dosage, benefits, etc.)
+- "Sure" after recommendation â†’ Confirm choice and offer next steps like pricing or where to buy`;
+
+    prompt += `\n${guidelinesRaw}\n${storeLocatorGuidelines}\n${acknowledgmentGuidelines}`;
     return prompt;
 }
 
@@ -384,7 +397,7 @@ async function generateResponse(userMessage, _, apiKey, history = [], userId = n
                 console.log(`\ní ½í²¬ [TIER 2] Fetching product page: ${productUrl}`);
                 const productPageContent = await fetchProductPageAndLinks(productUrl, 3);
                 if (productPageContent) {
-                    const tier15Prompt = `You are DynaBot. Answer the user based ONLY on the product page content below. Start with YES/NO and one sentence. If answer not found, say exactly "I cannot find the answer on the product page."\nUSER: ${userMessage}\nPRODUCT PAGE CONTENT: ${productPageContent.substring(0, 2500)}`;
+                    const tier15Prompt = `You are DynaBot, a helpful AI nutritionist for Dynamic Nutrition. Answer the user based ONLY on the product page content below. Start with YES/NO and one sentence. If answer not found, say exactly "I cannot find the answer on the product page."\nUSER: ${userMessage}\nPRODUCT PAGE CONTENT: ${productPageContent.substring(0, 2500)}`;
                     const tier15Messages = [
                         { role: "system", content: tier15Prompt },
                         ...history.slice(-6),
@@ -414,7 +427,7 @@ async function generateResponse(userMessage, _, apiKey, history = [], userId = n
         console.log(`\ní ½í²¬ [TIER 3] Searching website: dyna-nutrition.com`);
         const siteResults = await searchWebsite(searchQuery);
         if (siteResults && siteResults.length > 100) {
-            const tier2Prompt = `You are DynaBot. Answer the user based ONLY on the search results below. Start with YES/NO and one sentence. If answer not found, say exactly "I cannot find the answer in the search results."\nUSER: ${userMessage}\nRESULTS: ${siteResults.substring(0, 2000)}`;
+            const tier2Prompt = `You are DynaBot, a helpful AI nutritionist for Dynamic Nutrition. Answer the user based ONLY on the search results below. Start with YES/NO and one sentence. If answer not found, say exactly "I cannot find the answer in the search results."\nUSER: ${userMessage}\nRESULTS: ${siteResults.substring(0, 2000)}`;
             const tier2Messages = [
                 { role: "system", content: tier2Prompt },
                 ...history.slice(-6),
@@ -431,7 +444,7 @@ async function generateResponse(userMessage, _, apiKey, history = [], userId = n
         console.log(`\ní ½í²¬ [TIER 4] Searching internet via DuckDuckGo...`);
         const internetResults = await searchInternet(searchQuery);
         if (internetResults) {
-            const tier3Prompt = `You are DynaBot. Answer the user based on these internet search results. Start with YES/NO and one sentence. If not available, say exactly "I cannot find reliable information online."\nUSER: ${userMessage}\nRESULTS: ${internetResults}`;
+            const tier3Prompt = `You are DynaBot, a helpful AI nutritionist for Dynamic Nutrition. Answer the user based on these internet search results. Start with YES/NO and one sentence. If not available, say exactly "I cannot find reliable information online."\nUSER: ${userMessage}\nRESULTS: ${internetResults}`;
             const tier3Messages = [
                 { role: "system", content: tier3Prompt },
                 ...history.slice(-6),
