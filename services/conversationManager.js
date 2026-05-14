@@ -256,11 +256,23 @@ Decide what the user wants and what action to take.
 INTENTS:
 - price_check: asking about price/cost/money (NOT store locations!)
 - store_locator: ONLY when explicitly asking where to buy/find stores (NOT price queries!)
-- product_info: asking about benefits/ingredients/dosage/info
+- product_info: asking about benefits/ingredients/dosage/info (including follow-up questions!)
 - purchase_intent: wanting to buy/order
 - recommendation: asking for suggestions OR mentioning health conditions/needs (e.g., "I have joint pain", "need something for hair loss", "looking for immune support", "what should I take for [issue]")
 - general_inquiry: greeting, thanks, casual
 - escalation: asking for human agent
+
+IMPORTANT FOLLOW-UP QUESTION DETECTION:
+When a product is mentioned or is in context, these types of questions should be treated as product_info:
+- "how does [ingredient] work?" or "what does [ingredient] do?"
+- "how to take it?" or "dosage?" or "when should I take it?"
+- "is it suitable for [condition]?" or "can I take it if I have [condition]?" or "who can take it?"
+- "what are the side effects?" or "any precautions?"
+- "how does it work?" or "what are the benefits?"
+- Any question starting with "what", "how", "can I", "is it", "who" about the product in context
+
+CRITICAL: If product is in context, ALWAYS include it in the response:
+- If user asks a follow-up question and product=${ctx?.product || "product_name"} is in context â†’ intent="product_info", action="execute", product="${ctx?.product || "product_name"}"
 
 IMPORTANT: recommendation intent should be triggered when:
 - User explicitly asks for recommendation
@@ -626,21 +638,20 @@ async function executeTool(analysis, userMessage, userId, apiKey, phoneNumber) {
             if (product) {
                 console.log(`[CONV MANAGER] Getting product info for: ${product}`);
 
-                // TIER 1: Knowledge Base (JSON + Brochure)
-                //console.log(`   [TIER 1] Checking knowledge base...`);
-                //const info = await getProductInfoResponse(product);
-                //if (info) {
-                //    console.log(`   [TIER 1] âœ… Found in knowledge base`);
-                //    return info;
-                //}
+                // Check if this is a follow-up question about the product already in context
+                const ctx = getContext(userId);
+                const isFollowUpQuestion = ctx?.product === product && ctx?.currentIntent === 'product_info' && ctx?.turnsOnTopic > 1;
 
-                // TIER 1.5: DeepSeek with knowledge base
+                // Use actual user question for follow-ups, or generic "Tell me about" for new product queries
+                const userQuestion = isFollowUpQuestion ? userMessage : `Tell me about ${product}`;
+
+                // TIER 1.5: DeepSeek with knowledge base - use actual user question
                 console.log(`   [TIER 1.5] Calling DeepSeek with knowledge base...`);
                 const kb = getKnowledge();
                 const kbPrompt = buildKnowledgePrompt(product);
                 const tier15Messages = [
                     { role: "system", content: kbPrompt },
-                    { role: "user", content: `Tell me about ${product}` }
+                    { role: "user", content: userQuestion }
                 ];
                 const tier15Reply = await callDeepSeekWithRetry(tier15Messages, apiKey);
 
@@ -660,10 +671,10 @@ async function executeTool(analysis, userMessage, userId, apiKey, phoneNumber) {
                 if (productUrl) {
                     const productPageContent = await fetchProductPageAndLinks(productUrl, 3);
                     if (productPageContent) {
-                        const tier2Prompt = `You are DynaBot. Answer the user based ONLY on the product page content below. If answer not found, say exactly "I cannot find the answer on the product page."\nUSER: Tell me about ${product}\nPRODUCT PAGE CONTENT: ${productPageContent.substring(0, 2500)}`;
+                        const tier2Prompt = `You are DynaBot. Answer the user based ONLY on the product page content below. If answer not found, say exactly "I cannot find the answer on the product page."\nUSER: ${userQuestion}\nPRODUCT PAGE CONTENT: ${productPageContent.substring(0, 2500)}`;
                         const tier2Messages = [
                             { role: "system", content: tier2Prompt },
-                            { role: "user", content: `Tell me about ${product}` }
+                            { role: "user", content: userQuestion }
                         ];
                         const tier2Reply = await callDeepSeekWithRetry(tier2Messages, apiKey);
 
@@ -676,13 +687,13 @@ async function executeTool(analysis, userMessage, userId, apiKey, phoneNumber) {
 
                 // TIER 3: Website search
                 console.log(`   [TIER 3] Searching website...`);
-                const searchQuery = `${product} health supplement benefits`;
+                const searchQuery = isFollowUpQuestion ? userMessage : `${product} health supplement benefits`;
                 const siteResults = await searchWebsite(searchQuery);
                 if (siteResults && siteResults.length > 100) {
-                    const tier3Prompt = `You are DynaBot. Answer the user based ONLY on the search results below. If answer not found, say exactly "I cannot find the answer in the search results."\nUSER: Tell me about ${product}\nRESULTS: ${siteResults.substring(0, 2000)}`;
+                    const tier3Prompt = `You are DynaBot. Answer the user based ONLY on the search results below. If answer not found, say exactly "I cannot find the answer in the search results."\nUSER: ${userQuestion}\nRESULTS: ${siteResults.substring(0, 2000)}`;
                     const tier3Messages = [
                         { role: "system", content: tier3Prompt },
-                        { role: "user", content: `Tell me about ${product}` }
+                        { role: "user", content: userQuestion }
                     ];
                     const tier3Reply = await callDeepSeekWithRetry(tier3Messages, apiKey);
 
@@ -775,7 +786,7 @@ async function processMessage(userMessage, history, userId, apiKey, phoneNumber)
 
     // 1. Switch to price_check if context has product AND user asks about price
     if (ctx?.product && isPriceQuery(userMessage) && analysis.intent !== 'price_check') {
-        console.log(`í ½í´„ [CONV MANAGER] Context has product (${ctx.product}) + price query â†’ switching to price_check`);
+        console.log(`[CONV MANAGER] Context has product (${ctx.product}) + price query â†’ switching to price_check`);
         analysis.intent = 'price_check';
         analysis.action = 'execute';
         analysis.product = ctx.product; // Use product from context
@@ -783,7 +794,7 @@ async function processMessage(userMessage, history, userId, apiKey, phoneNumber)
 
     // 2. Switch to store_locator if context has product AND user asks where to buy
     if (ctx?.product && isStoreQuery(userMessage) && analysis.intent !== 'store_locator') {
-        console.log(`í ½í´„ [CONV MANAGER] Context has product (${ctx.product}) + store query â†’ switching to store_locator`);
+        console.log(`[CONV MANAGER] Context has product (${ctx.product}) + store query â†’ switching to store_locator`);
         analysis.intent = 'store_locator';
         analysis.action = 'execute';
         analysis.product = ctx.product; // Use product from context
