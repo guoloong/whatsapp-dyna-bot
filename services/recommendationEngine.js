@@ -40,8 +40,14 @@ CRITICAL RULES:
 1. You MUST ONLY recommend products listed in the PRODUCT CATALOG below
 2. DO NOT invent, hallucinate, or modify product names
 3. Each recommended productName must EXACTLY match a product name from the catalog
-4. If no product matches the user's needs, return empty recommendations array
+4. If no exact match, find the CLOSEST/RELATED product that may help with the user's condition
 5. Consider the supplementary brochure information if provided for any product
+6. RELAXED MATCHING: Use partial keywords. For example:
+   - "butt pain" → could match "joint" or "bone" products
+   - "headache" → could match "energy" or "stress" products
+   - "stomach" → could match "digestion" or "probiotic" products
+7. ALWAYS return at least 1 recommendation if ANY product could potentially help
+8. If truly no product could help at all, return: {"recommendations": []}
 
 USER'S HEALTH NEEDS: {userNeeds}
 
