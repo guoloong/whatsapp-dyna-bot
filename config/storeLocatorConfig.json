@@ -1,0 +1,25 @@
+{
+  "onlineStoreUrl": "https://www.dyna-nutrition.com",
+  "regionsWithPhysicalStores": [
+    "singapore",
+    "sg",
+    "malaysia",
+    "kl",
+    "kuala lumpur",
+    "pj",
+    "petaling jaya",
+    "subang jaya",
+    "subang",
+    "shah alam",
+    "johor",
+    "jb",
+    "johor bahru",
+    "penang",
+    "george town",
+    "klang",
+    "seremban",
+    "ipoh",
+    "melaka"
+  ],
+  "storeNotAvailableMessage": "Sorry, we don't have physical stores in {location}.\n\nYou can purchase online from our official store: {url}"
+}
