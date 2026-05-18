@@ -55,17 +55,11 @@ Example: ["First chunk content here", "Second chunk content", "Third chunk"]
 /**
  * Split message using LLM for intelligent chunking
  * Falls back to regex splitter if LLM fails
- *
- * @param {string} text - The message to split
- * @param {string} apiKey - DeepSeek API key
- * @param {Function} fallbackSplitter - Regex fallback function
- * @returns {Promise<string[]>} - Array of chunks
  */
 async function splitWithLLM(text, apiKey, fallbackSplitter) {
     if (!text || text.length === 0) return [];
     if (text.length <= MAX_CHUNK_SIZE) return [text];
 
-    // For very short texts, skip LLM
     if (text.length < 300) {
         return fallbackSplitter(text);
     }
@@ -107,21 +101,20 @@ Rules:
         clearTimeout(timeoutId);
 
         const content = response.data.choices[0].message.content.trim();
-        console.log(`📤 [LLM Splitter] Response (${content.length} chars): "${content.substring(0, 100)}..."`);
+        console.log(`[SPLITTER] LLM Response (${content.length} chars)`);
 
-        // Parse JSON array from response
         const chunks = parseLLMResponse(content);
 
         if (chunks && chunks.length > 0 && validateChunks(chunks)) {
-            console.log(`📤 [LLM Splitter] Successfully split into ${chunks.length} chunks`);
+            console.log(`[SPLITTER] Successfully split into ${chunks.length} chunks`);
             return chunks;
         }
 
-        console.log(`📤 [LLM Splitter] Invalid response, using fallback`);
+        console.log(`[SPLITTER] Invalid response, using fallback`);
         return fallbackSplitter(text);
 
     } catch (err) {
-        console.log(`📤 [LLM Splitter] Failed: ${err.message}, using fallback`);
+        console.log(`[SPLITTER] Failed: ${err.message}, using fallback`);
         return fallbackSplitter(text);
     }
 }
@@ -131,7 +124,6 @@ Rules:
  */
 function parseLLMResponse(content) {
     try {
-        // Try to find JSON array in response
         const jsonMatch = content.match(/\[[\s\S]*\]/);
         if (jsonMatch) {
             const parsed = JSON.parse(jsonMatch[0]);
@@ -140,7 +132,6 @@ function parseLLMResponse(content) {
             }
         }
 
-        // Try parsing the whole content as JSON
         const parsed = JSON.parse(content);
         if (Array.isArray(parsed)) {
             return parsed;
@@ -148,7 +139,6 @@ function parseLLMResponse(content) {
 
         return null;
     } catch (e) {
-        // Try to extract strings from malformed JSON
         const strings = content.match(/"([^"\\]*(\\.[^"\\]*)*)"/g);
         if (strings && strings.length > 0) {
             return strings.map(s => s.slice(1, -1).replace(/\\"/g, '"'));
@@ -162,17 +152,15 @@ function parseLLMResponse(content) {
  */
 function validateChunks(chunks) {
     if (!chunks || chunks.length === 0) return false;
-    if (chunks.length > 20) return false; // Too many chunks suggests bad output
+    if (chunks.length > 20) return false;
 
     for (const chunk of chunks) {
         if (typeof chunk !== 'string') return false;
-        if (chunk.length > MAX_CHUNK_SIZE + 50) return false; // Allow small overflow for safety
-        if (chunk.length < 3) return false; // Too short (likely broken)
+        if (chunk.length > MAX_CHUNK_SIZE + 50) return false;
+        if (chunk.length < 3) return false;
     }
 
-    // Check that we didn't break bullet points
     for (const chunk of chunks) {
-        // If chunk starts with bullet marker, it should have content
         if (/^[\s]*[-•*]\s/.test(chunk) && chunk.length < 10) {
             return false;
         }
@@ -182,7 +170,7 @@ function validateChunks(chunks) {
 }
 
 /**
- * Smart regex-based fallback splitter (used when LLM fails)
+ * Smart regex-based fallback splitter
  */
 function smartFallbackSplitter(text) {
     if (!text || typeof text !== 'string') return [];
@@ -196,11 +184,9 @@ function smartFallbackSplitter(text) {
         const trimmedParagraph = paragraph.trim();
         if (!trimmedParagraph) continue;
 
-        // Check if paragraph is a bullet list
         const isBulletList = /^[\s]*[-•*]\s/m.test(trimmedParagraph);
 
         if (isBulletList) {
-            // For bullet lists, try to keep them together
             if (currentChunk.length + trimmedParagraph.length + 2 <= SOFT_MAX) {
                 currentChunk += (currentChunk ? '\n\n' : '') + trimmedParagraph;
             } else {
@@ -208,7 +194,6 @@ function smartFallbackSplitter(text) {
                 currentChunk = trimmedParagraph;
             }
         } else if (trimmedParagraph.length > MAX_CHUNK_SIZE) {
-            // Split long paragraph by sentences
             if (currentChunk.trim()) {
                 chunks.push(currentChunk.trim());
                 currentChunk = '';
@@ -217,7 +202,6 @@ function smartFallbackSplitter(text) {
             const sentences = splitBySentences(trimmedParagraph);
             for (const sentence of sentences) {
                 if (sentence.length > MAX_CHUNK_SIZE) {
-                    // Very long sentence - split by commas
                     const fragments = splitByClauses(sentence);
                     for (const frag of fragments) {
                         currentChunk = addToChunk(currentChunk, frag, chunks);
@@ -247,7 +231,7 @@ function splitBySentences(text) {
 }
 
 /**
- * Split long text by clauses (comma-separated parts)
+ * Split long text by clauses
  */
 function splitByClauses(text) {
     if (text.length <= MAX_CHUNK_SIZE) return [text];
@@ -273,7 +257,6 @@ function splitByClauses(text) {
         }
     }
 
-    // Fallback: word-based split
     const words = text.split(/\s+/);
     const chunks = [];
     let current = '';
@@ -308,7 +291,6 @@ function addToChunk(current, content, chunks) {
         return content;
     }
 
-    // Need to split content
     const sentences = splitBySentences(content);
     let tempChunk = '';
 
@@ -350,18 +332,13 @@ function mergeSmallChunks(chunks) {
 
 /**
  * Main function - LLM-based split with fallback
- *
- * @param {string} text - Message to split
- * @param {string} apiKey - DeepSeek API key (optional, uses fallback if not provided)
- * @returns {Promise<string[]>} - Array of chunks
  */
 async function splitIntoChunks(text, apiKey = null) {
     if (!text || text.length === 0) return [];
     if (text.length <= MAX_CHUNK_SIZE) return [text];
 
-    // If no API key, use fallback directly
     if (!apiKey) {
-        console.log(`📤 [LLM Splitter] No API key, using smart fallback`);
+        console.log(`[SPLITTER] No API key, using smart fallback`);
         return smartFallbackSplitter(text);
     }
 
@@ -370,7 +347,6 @@ async function splitIntoChunks(text, apiKey = null) {
 
 /**
  * Synchronous version - always uses fallback
- * Use this when you don't want LLM overhead
  */
 function splitWithFallback(text) {
     return smartFallbackSplitter(text);

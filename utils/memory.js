@@ -1,4 +1,6 @@
 // utils/memory.js
+// Conversation history management per user
+
 const fs = require('fs');
 const path = require('path');
 const MEMORY_FILE = path.join(__dirname, '..', 'conversations.json');
@@ -16,7 +18,7 @@ function save() {
             const obj = Object.fromEntries(userHistories);
             fs.writeFileSync(MEMORY_FILE, JSON.stringify(obj, null, 2));
         } catch (err) {
-            console.error('Memory save error:', err);
+            console.error('[MEMORY] Save error:', err);
         }
     }, 500);
 }
@@ -37,7 +39,7 @@ function load() {
             save();
         }
     } catch (err) {
-        console.error('Memory load error:', err);
+        console.error('[MEMORY] Load error:', err);
     }
 }
 
@@ -69,16 +71,14 @@ function clearHistory(userId) {
     save();
 }
 
-// Check if product image has been shown to this user
 function hasProductBeenShown(userId, productName) {
-    if (!productName) return true; // Don't show if no product
+    if (!productName) return true;
     const entry = userHistories.get(userId);
     if (!entry) return false;
     if (!entry.shownProducts) return false;
     return entry.shownProducts.includes(productName);
 }
 
-// Mark product image as shown to this user
 function markProductAsShown(userId, productName) {
     if (!productName) return;
     let entry = userHistories.get(userId);
@@ -93,7 +93,7 @@ function markProductAsShown(userId, productName) {
     }
 }
 
-// Periodic cleanup (24h)
+// Periodic cleanup
 setInterval(() => {
     const now = Date.now();
     let changed = false;
@@ -111,7 +111,7 @@ setInterval(() => {
     if (changed) save();
 }, 24 * 3600 * 1000);
 
-// Graceful shutdown – saves memory when process exits naturally
+// Graceful shutdown
 process.on('exit', () => {
     try {
         fs.writeFileSync(MEMORY_FILE, JSON.stringify(Object.fromEntries(userHistories), null, 2));
