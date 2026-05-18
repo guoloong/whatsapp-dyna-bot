@@ -1,6 +1,19 @@
 // services/storeLocator.js
 // LLM-based Store Locator - Uses AI to understand user intent, extract locations, and parse store data
+
 const axios = require('axios');
+const path = require('path');
+const fs = require('fs');
+
+// Load store locator config
+const configPath = path.join(__dirname, '../config/storeLocatorConfig.json');
+let storeLocatorConfig = { regionsWithPhysicalStores: [], onlineStoreUrl: '', storeNotAvailableMessage: '' };
+try {
+    const configData = fs.readFileSync(configPath, 'utf8');
+    storeLocatorConfig = JSON.parse(configData);
+} catch (err) {
+    console.warn('[STORE] Could not load storeLocatorConfig.json, using defaults');
+}
 
 // API configuration
 const STORE_API_BASE = 'https://www.dyna-nutrition.com/wp-json/mlp-api/v1';
@@ -18,24 +31,20 @@ const STORE_CACHE_TTL = 5184000000; // 2 months
 // Session state for multi-step store queries
 let pendingProductSlug = null;
 let pendingTimestamp = 0;
-const PENDING_TTL = 5184000000; // 2 months to respond with location
+const PENDING_TTL = 5184000000; // 2 months
 
-// Track if we just completed a search (don't clear pending immediately)
-let justCompletedSearch = false;
-
-// Track last mentioned product (for general context - not just store queries)
+// Track last mentioned product
 let lastMentionedProductSlug = null;
 let lastMentionedTimestamp = 0;
-const LAST_MENTIONED_TTL = 5184000000; // 2 months to remember product
+const LAST_MENTIONED_TTL = 5184000000; // 2 months
 
-// Known product slug mappings (lowercase → API slug)
+// Known product slug mappings
 const PRODUCT_SLUG_MAP = {
     'bionatto': 'bionatto',
     'bio-natto': 'bionatto',
     'bionatto plus': 'bionatto',
     'men guard': 'men-guard',
     'men-guard': 'men-guard',
-    'men guard capsule': 'men-guard',
     'men guard capsule': 'men-guard',
     'menguard': 'men-guard',
     'ashiguard': 'ashiguard',
@@ -65,19 +74,17 @@ const PRODUCT_SLUG_MAP = {
 };
 
 /**
- * Normalize product name to API slug using mapping
+ * Normalize product name to API slug
  */
 function normalizeProductSlug(productName) {
     const lower = productName.toLowerCase().trim();
 
-    // Check mapping first
     if (PRODUCT_SLUG_MAP[lower]) {
         return PRODUCT_SLUG_MAP[lower];
     }
 
-    // Smart stripping of common suffixes
     let slug = lower
-        .replace(/\s*(plus|capsule|capsules|tablet|tablets|tablet|softgel)\s*/gi, '')
+        .replace(/\s*(plus|capsule|capsules|tablet|softgel)\s*/gi, '')
         .replace(/\s+/g, '-')
         .replace(/[^a-z0-9\-]/g, '');
 
@@ -86,12 +93,10 @@ function normalizeProductSlug(productName) {
 
 /**
  * Check if location is a country that needs more specific area
- * Stores only exist in Malaysia and Singapore - only Malaysia is too broad
  */
 function isBigRegion(location) {
     if (!location) return false;
     const lowerLoc = location.toLowerCase();
-    // Only Malaysia is too broad - Singapore is small enough
     if (lowerLoc.includes('malaysia') || lowerLoc === 'kl' || lowerLoc.includes('kuala lumpur')) {
         return true;
     }
@@ -116,13 +121,12 @@ const KNOWN_LOCATIONS = [
 ];
 
 /**
- * Track a product mentioned by the user (for context across messages)
+ * Track a product mentioned by the user
  */
 function trackMentionedProduct(productSlug) {
     if (productSlug) {
         lastMentionedProductSlug = productSlug;
         lastMentionedTimestamp = Date.now();
-        console.log(`������ [STORE LOCATOR] Tracked last mentioned product: ${productSlug}`);
     }
 }
 
@@ -139,7 +143,6 @@ function getLastMentionedProduct() {
 
 /**
  * Use LLM to analyze user message and extract location + product intent
- * Returns: { productSlug, location, needsLocation, intent }
  */
 async function analyzeUserIntent(userMessage, apiKey) {
     const prompt = `You are a store locator assistant for a health products chatbot. Analyze the user message.
@@ -184,11 +187,9 @@ User message: "${userMessage}"`;
         clearTimeout(timeoutId);
         const content = response.data.choices[0].message.content.trim();
 
-        // Extract JSON
         let jsonStr = content.replace(/```json\n?|```\n?/gi, '').trim();
         const parsed = JSON.parse(jsonStr);
 
-        // Track product if found (for context across messages)
         if (parsed.product) {
             trackMentionedProduct(parsed.product);
         }
@@ -200,8 +201,7 @@ User message: "${userMessage}"`;
             intent: parsed.intent || 'find_stores'
         };
     } catch (err) {
-        console.log(`⚠️ LLM intent analysis failed: ${err.message}`);
-        // Fallback: basic detection
+        console.log(`[STORE] LLM intent analysis failed: ${err.message}`);
         return fallbackIntentDetection(userMessage);
     }
 }
@@ -212,7 +212,6 @@ User message: "${userMessage}"`;
 function fallbackIntentDetection(userMessage) {
     const lowerText = userMessage.toLowerCase();
 
-    // Check for store-related keywords
     const storeKeywords = ['where to buy', 'where can i buy', 'store', 'stores', 'pharmacy', 'buy', 'sell', 'near', 'singapore', 'malaysia'];
     const isStoreQuery = storeKeywords.some(k => lowerText.includes(k));
 
@@ -220,7 +219,6 @@ function fallbackIntentDetection(userMessage) {
         return { productSlug: null, location: null, needsLocation: false, intent: 'general_inquiry' };
     }
 
-    // Extract product
     let productSlug = null;
     for (const [name, slug] of Object.entries(PRODUCT_SLUG_MAP)) {
         if (lowerText.includes(name)) {
@@ -229,7 +227,6 @@ function fallbackIntentDetection(userMessage) {
         }
     }
 
-    // Extract location
     let location = null;
     for (const loc of KNOWN_LOCATIONS) {
         if (lowerText.includes(loc)) {
@@ -247,128 +244,18 @@ function fallbackIntentDetection(userMessage) {
 }
 
 /**
- * Use LLM to parse raw store data into clean, readable format
- */
-async function parseStoresWithLLM(stores, apiKey) {
-    /* =========================================================================
-     * DISABLED - Going straight to fallback (cleanAddress/cleanPhone)
-     *
-     * The LLM parsing code below is preserved for reference but never executes.
-     * The function now goes directly to the fallback which provides equally
-     * accurate results with instant response time and zero API costs.
-     *
-     * To re-enable: Move the code block below into the main function body
-     * and remove the direct fallback at the bottom.
-     * Recommended timeout if re-enabling: 45-50 seconds minimum
-     * ========================================================================
-
-    if (!stores || stores.length === 0) return stores;
-
-    // Prepare ALL store data for LLM (no limit)
-    const storeData = stores.map((s, i) => {
-        return `${i + 1}. Name: ${s.name || 'Unknown'}, Address: ${s.address || s.raw_address || 'N/A'}, Phone: ${s.phone || s.raw_phone || 'N/A'}`;
-    }).join('\n');
-
-    const prompt = `Parse these store records and return clean information. For each store, extract:
-- name: Clean store name (e.g., "R Pharmacy", "Caring Pharmacy")
-- address: Full address with city/state (e.g., "123 Main St, Petaling Jaya, Selangor")
-- phone: Clean phone number (format: 01X-XXX XXXX for Malaysia, +65 XXXX XXXX for Singapore)
-- state: The state/region (e.g., "Selangor", "Singapore", "Kuala Lumpur")
-- area: The specific area (e.g., "Subang Jaya", "Orchard")
-
-Return ONLY a valid JSON array:
-[{"name": "R Pharmacy", "address": "...", "phone": "...", "state": "...", "area": "..."}]
-
-STORES:
-${storeData}`;
-
-    try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 15000);
-
-        const response = await axios.post(
-            'https://api.deepseek.com/v1/chat/completions',
-            {
-                model: 'deepseek-chat',
-                messages: [
-                    { role: 'system', content: 'You are a data parsing assistant. Return ONLY valid JSON array, no explanation.' },
-                    { role: 'user', content: prompt }
-                ],
-                temperature: 0,
-                max_tokens: 8000
-            },
-            {
-                headers: { 'Authorization': `Bearer ${apiKey}` },
-                signal: controller.signal,
-                timeout: 18000
-            }
-        );
-
-        clearTimeout(timeoutId);
-        const content = response.data.choices[0].message.content.trim();
-
-        // Extract JSON
-        let jsonStr = content.replace(/```json\n?|```\n?/gi, '').trim();
-        const parsedStores = JSON.parse(jsonStr);
-
-        // Merge with original data
-        return stores.map((store, i) => {
-            if (parsedStores[i]) {
-                return {
-                    ...store,
-                    name: parsedStores[i].name || store.name,
-                    address: parsedStores[i].address || store.address,
-                    phone: parsedStores[i].phone || store.phone,
-                    state: parsedStores[i].state || store.state,
-                    area: parsedStores[i].area || ''
-                };
-            }
-            return store;
-        });
-    } catch (err) {
-        if (err.code === 'ECONNABORTED' || err.name === 'CanceledError' || err.message.includes('abort')) {
-            console.log(`⚠️ LLM store parsing timed out (${err.message}) - using basic cleanup`);
-        } else {
-            console.log(`⚠️ LLM store parsing failed: ${err.message}`);
-        }
-        // Fallback: basic cleanup
-        return stores.map(s => ({
-            ...s,
-            address: cleanAddress(s.address || s.raw_address || ''),
-            phone: cleanPhone(s.phone || s.raw_phone || '')
-        }));
-    }
-
-    END OF DISABLED LLM CODE
-    ========================================================================= */
-
-    // PRIMARY PATH: Direct fallback using cleanAddress/cleanPhone
-    // This is now the main implementation - fast, accurate, zero API cost
-    if (!stores || stores.length === 0) return stores;
-
-    return stores.map(s => ({
-        ...s,
-        address: cleanAddress(s.address || s.raw_address || ''),
-        phone: cleanPhone(s.phone || s.raw_phone || '')
-    }));
-}
-
-/**
- * Basic address cleanup (fallback when LLM fails)
+ * Basic address cleanup
  */
 function cleanAddress(raw) {
     if (!raw) return 'Address not available';
-    // Remove extra whitespace
     let cleaned = raw.replace(/\s+/g, ' ').trim();
-    // Remove trailing phone numbers
     cleaned = cleaned.replace(/\+\d[\s\-]?\d[\s\-]?\d[\s\-]?\d[\s\-]?\d[\/\s].*$/, '');
-    // Remove time patterns
     cleaned = cleaned.replace(/\d:\d\d\s*(am|pm)\s*-\s*\d:\d\d\s*(am|pm)\s*$/gi, '');
     return cleaned || 'Address not available';
 }
 
 /**
- * Basic phone cleanup (fallback when LLM fails)
+ * Basic phone cleanup
  */
 function cleanPhone(raw) {
     if (!raw) return 'Phone not available';
@@ -380,11 +267,311 @@ function cleanPhone(raw) {
         } else if (phone.startsWith('60') && phone.length === 11) {
             return `+60 ${phone.slice(2, 3)}-${phone.slice(3)}`;
         } else if (phone.startsWith('0') && phone.length === 10) {
-            return `${phone.slice(0, 3)}-${phone.slice(3)} ${phone.slice(6)}`;
+            return `${phone.slice(0, 3)}-${phone.slice(3)}`;
         }
         return phone;
     }
     return raw || 'Phone not available';
+}
+
+/**
+ * Parse store data
+ */
+async function parseStoresWithLLM(stores, apiKey) {
+    // Primary path: Direct cleanup (fast, accurate, zero API cost)
+    if (!stores || stores.length === 0) return stores;
+
+    return stores.map(s => ({
+        ...s,
+        address: cleanAddress(s.address || s.raw_address || ''),
+        phone: cleanPhone(s.phone || s.raw_phone || '')
+    }));
+}
+
+/**
+ * Manual store formatting
+ */
+function formatStoresManually(productName, stores, location) {
+    let message = `Here are stores for ${productName || 'our products'}`;
+    if (location) message += ` in ${location}`;
+    message += ':\n\n';
+
+    stores.forEach((store, i) => {
+        message += `${i + 1}. ${store.name || 'Store'}\n`;
+        message += `   Address: ${store.address || store.raw_address || 'N/A'}\n`;
+        message += `   Phone: ${store.phone || store.raw_phone || 'N/A'}\n\n`;
+    });
+
+    message += `Tip: Call ahead to confirm availability before visiting.`;
+    return message;
+}
+
+/**
+ * Fetch products from API
+ */
+async function fetchProducts(forceRefresh = false) {
+    const now = Date.now();
+
+    if (!forceRefresh && productsCache && (now - productsCacheTime < PRODUCTS_CACHE_TTL)) {
+        return productsCache;
+    }
+
+    try {
+        const response = await axios.get(PRODUCT_API_URL, { timeout: 10000 });
+        if (response.data && response.data.products) {
+            productsCache = response.data.products;
+            productsCacheTime = now;
+            return productsCache;
+        }
+        return productsCache || [];
+    } catch (err) {
+        console.error(`[STORE] Failed to fetch products: ${err.message}`);
+        return productsCache || [];
+    }
+}
+
+/**
+ * Fetch stores for a product
+ */
+async function fetchStoresForProduct(productSlug, forceRefresh = false) {
+    const now = Date.now();
+    const cacheKey = productSlug;
+
+    if (!forceRefresh && storeCache.has(cacheKey)) {
+        const cached = storeCache.get(cacheKey);
+        if (now - cached.time < STORE_CACHE_TTL) {
+            return cached.data;
+        }
+    }
+
+    try {
+        const url = `${STORE_API_BASE}/stores?product=${encodeURIComponent(productSlug)}`;
+        const response = await axios.get(url, { timeout: 10000 });
+
+        if (response.data && response.data.stores) {
+            storeCache.set(cacheKey, { data: response.data.stores, time: now });
+            return response.data.stores;
+        }
+        return [];
+    } catch (err) {
+        console.error(`[STORE] Failed to fetch stores for ${productSlug}: ${err.message}`);
+        if (storeCache.has(cacheKey)) {
+            return storeCache.get(cacheKey).data;
+        }
+        return [];
+    }
+}
+
+/**
+ * Main function: Find and return store information
+ * routeParams: { productName, location } from messageRouter
+ */
+async function findStores(userMessage, apiKey, routeParams = {}) {
+    console.log(`[STORE] Analyzing: "${userMessage}"`);
+    console.log(`[STORE] Route params:`, routeParams);
+
+    const now = Date.now();
+    const hasPendingProduct = pendingProductSlug && (now - pendingTimestamp < PENDING_TTL);
+
+    // Step 1: Use LLM to understand user intent
+    const intent = await analyzeUserIntent(userMessage, apiKey);
+    console.log(`[STORE] Intent from LLM:`, intent);
+
+    // Step 1.5: Use routeParams.productName from router FIRST if available
+    if (routeParams.productName) {
+        intent.productSlug = routeParams.productName;
+        console.log(`[STORE] Using product from router: ${intent.productSlug}`);
+    }
+
+    // Check if this is a location-only response (user only provided location, product was pending)
+    const isLocationOnly = !intent.productSlug && intent.location && hasPendingProduct;
+
+    if (isLocationOnly) {
+        console.log(`[STORE] Using pending product: ${pendingProductSlug}`);
+        intent.productSlug = pendingProductSlug;
+        intent.needsLocation = false;
+        intent.intent = 'find_stores';
+    }
+
+    // Use location from routeParams if available
+    if (routeParams.location && !intent.location) {
+        intent.location = routeParams.location;
+    }
+
+    // Store pending product
+    if (intent.productSlug && (intent.needsLocation || intent.location)) {
+        pendingProductSlug = intent.productSlug;
+        pendingTimestamp = now;
+    }
+
+    // Step 2: If needs location but none provided, ask for it
+    if (intent.needsLocation && !intent.location) {
+        return {
+            needsLocation: true,
+            text: `To find stores, please share your location/area.\n\nExample responses:\n- "in Singapore"\n- "near Subang Jaya"\n- "I'm in Shah Alam"\n- "Selangor area"`,
+            productSlug: intent.productSlug
+        };
+    }
+
+    // Step 2.5: Check if location is too broad
+    if (intent.location && isBigRegion(intent.location)) {
+        console.log(`[STORE] Location "${intent.location}" is too broad, asking for specific area`);
+        return {
+            needsLocation: true,
+            text: getSpecificAreasMessage(intent.location),
+            productSlug: intent.productSlug,
+            location: intent.location
+        };
+    }
+
+    // Step 3: If no product identified, check pending/last mentioned
+    if (!intent.productSlug) {
+        if (intent.location && hasPendingProduct) {
+            intent.productSlug = pendingProductSlug;
+            intent.needsLocation = false;
+            intent.intent = 'find_stores';
+        } else if (!intent.productSlug && intent.location) {
+            const lastProduct = getLastMentionedProduct();
+            if (lastProduct) {
+                intent.productSlug = lastProduct;
+                intent.needsLocation = false;
+                intent.intent = 'find_stores';
+            }
+        }
+
+        if (!intent.productSlug) {
+            const lastProduct = getLastMentionedProduct();
+            if (lastProduct) {
+                intent.productSlug = lastProduct;
+                intent.needsLocation = false;
+                intent.intent = 'find_stores';
+            } else {
+                return {
+                    success: true,
+                    stores: [],
+                    noContext: true,
+                    text: `To help you find stores, please mention which product you're looking for.\n\nFor example: "Where can I buy Men Guard in Singapore?"\n\nOr if you mentioned a product earlier in our chat, just share your location!`
+                };
+            }
+        }
+    }
+
+    // Step 4: Check if location is in a supported region
+    // If not, skip API call and go straight to online purchase suggestion
+    const locationLower = intent.location?.toLowerCase() || '';
+    const isKnownRegionWithStores = storeLocatorConfig.regionsWithPhysicalStores.some(
+        r => locationLower.includes(r)
+    );
+
+    if (intent.location && !isKnownRegionWithStores) {
+        console.log(`[STORE] Location "${intent.location}" is not in supported regions, suggesting online purchase`);
+        return {
+            success: true,
+            stores: [],
+            noStoresInArea: true,
+            text: `Sorry, we don't have physical stores in ${intent.location}.\n\nYou can purchase online from our official store: ${storeLocatorConfig.onlineStoreUrl}`,
+            productSlug: intent.productSlug
+        };
+    }
+
+    // Step 5: Fetch stores for the product
+    console.log(`[STORE] Fetching stores for: ${intent.productSlug}`);
+    const stores = await fetchStoresForProduct(intent.productSlug);
+    console.log(`[STORE] Raw stores returned from API: ${stores.length}`);
+
+    if (stores.length === 0) {
+        console.log(`[STORE] No stores found for product: ${intent.productSlug}`);
+        return {
+            success: true,
+            stores: [],
+            text: `Sorry, I couldn't find any stores selling this product.\n\nPlease try a different product or contact our support.`,
+            productSlug: intent.productSlug
+        };
+    }
+
+    // Step 5: Parse store data
+    const parsedStores = await parseStoresWithLLM(stores, apiKey);
+    console.log(`[STORE] Parsed stores from LLM: ${parsedStores.length}`);
+
+    // Get product display name
+    let productDisplayName = 'our products';
+    try {
+        const products = await fetchProducts();
+        const product = products.find(p => p.slug === intent.productSlug);
+        if (product) productDisplayName = product.name;
+    } catch (e) {
+        // ignore
+    }
+
+    // Step 6: Filter by location if provided
+    let filteredStores = parsedStores;
+    let noStoresInArea = false;
+
+    if (intent.location) {
+        const lowerLoc = intent.location.toLowerCase();
+        console.log(`[STORE] Filtering for location: "${intent.location}" (${lowerLoc})`);
+        console.log(`[STORE] Total parsed stores: ${parsedStores.length}`);
+
+        filteredStores = parsedStores.filter(s => {
+            const state = (s.state || '').toLowerCase();
+            const area = (s.area || '').toLowerCase();
+            const address = (s.address || '').toLowerCase();
+            return state.includes(lowerLoc) || area.includes(lowerLoc) || address.includes(lowerLoc);
+        });
+
+        console.log(`[STORE] Stores matching location "${intent.location}": ${filteredStores.length}`);
+
+        if (filteredStores.length === 0) {
+            noStoresInArea = true;
+        }
+    } else {
+        console.log(`[STORE] No location filter applied, showing all ${parsedStores.length} stores`);
+    }
+
+    // Handle no stores in area
+    if (noStoresInArea) {
+        let text;
+
+        if (isKnownRegionWithStores) {
+            // Known region (Malaysia/Singapore) but no stores for this product
+            text = `Sorry, I couldn't find any ${productDisplayName} stores in ${intent.location}.\n\nOur products are available in major cities like Singapore, Kuala Lumpur, Penang, Johor, and other areas.\n\nWould you like to try a different location?`;
+        } else {
+            // Region without physical stores (HK, etc) - suggest online purchase
+            text = `Sorry, we don't have physical stores in ${intent.location}.\n\nYou can purchase online from our official store: ${storeLocatorConfig.onlineStoreUrl}`;
+        }
+
+        return {
+            success: true,
+            stores: [],
+            noStoresInArea: true,
+            text: text,
+            productSlug: intent.productSlug
+        };
+    }
+
+    // Limit to 7 stores for display
+    const displayLimit = 7;
+    const hasMoreStores = filteredStores.length > displayLimit;
+    const storesToDisplay = filteredStores.slice(0, displayLimit);
+
+    console.log(`[STORE] Returning ${storesToDisplay.length} stores for display (${hasMoreStores ? 'more available' : 'showing all'})`);
+
+    // Step 7: Generate response
+    const responseText = await generateStoreResponse(productDisplayName, storesToDisplay, intent.location, apiKey, hasMoreStores, filteredStores.length);
+
+    pendingTimestamp = Date.now();
+    if (intent.productSlug) {
+        trackMentionedProduct(intent.productSlug);
+    }
+
+    return {
+        success: true,
+        stores: storesToDisplay,
+        hasMoreStores,
+        totalStores: filteredStores.length,
+        text: responseText,
+        productSlug: intent.productSlug
+    };
 }
 
 /**
@@ -395,14 +582,12 @@ async function generateStoreResponse(productName, stores, location, apiKey, hasM
         return `Sorry, I couldn't find any stores selling ${productName} in ${location || 'your area'}.\n\nPlease try a different location or product, or contact our support for assistance.`;
     }
 
-    // Format stores for LLM
     const storeList = stores.map((s, i) =>
-        `${i + 1}. ${s.name || 'Store'}: ${s.address || s.raw_address || 'N/A'}, Phone: ${s.phone || s.raw_phone || 'N/A'}`
+        `${i + 1}. ${s.name || 'Store'}: ${s.address || 'N/A'}, Phone: ${s.phone || 'N/A'}`
     ).join('\n');
 
-    // Build the more results note if needed
     const moreResultsNote = hasMoreStores
-        ? `\n\nNOTE: There are actually ${totalCount} stores in this area. I'm showing you the top 7. To see more specific stores, please provide a more specific location (e.g., "in Subang Jaya" or "near KLCC").`
+        ? `\n\nNOTE: There are actually ${totalCount} stores in this area. I'm showing you the top 7. To see more specific stores, please provide a more specific location.`
         : '';
 
     const prompt = `Generate a friendly WhatsApp message listing stores for ${productName || 'our products'}${location ? ` in ${location}` : ''}.
@@ -416,9 +601,8 @@ Requirements:
 - List each store with number, name, address, and phone
 - Keep it concise and readable
 - Add a friendly closing tip
-- NO emojis (WhatsApp compatibility issues)
+- NO emojis
 - NO distances or directions
-- If there are more results, mention it at the end
 
 Example format:
 "Here are stores where you can find BioNatto in Singapore:
@@ -459,316 +643,29 @@ Tip: Call ahead to confirm availability before visiting."`;
         return response.data.choices[0].message.content.trim();
     } catch (err) {
         if (err.code === 'ECONNABORTED' || err.name === 'CanceledError' || err.message.includes('abort')) {
-            console.log(`⚠️ LLM response generation timed out - using manual formatting`);
+            console.log(`[STORE] LLM response generation timed out - using manual formatting`);
         } else {
-            console.log(`⚠️ LLM response generation failed: ${err.message}`);
+            console.log(`[STORE] LLM response generation failed: ${err.message}`);
         }
-        // Fallback: format ourselves
         return formatStoresManually(productName, stores, location);
     }
 }
 
 /**
- * Manual store formatting (fallback when LLM fails)
- */
-function formatStoresManually(productName, stores, location) {
-    let message = `Here are stores for ${productName || 'our products'}`;
-    if (location) message += ` in ${location}`;
-    message += ':\n\n';
-
-    stores.forEach((store, i) => {
-        message += `${i + 1}. ${store.name || 'Store'}\n`;
-        message += `   Address: ${store.address || store.raw_address || 'N/A'}\n`;
-        message += `   Phone: ${store.phone || store.raw_phone || 'N/A'}\n\n`;
-    });
-
-    message += `Tip: Call ahead to confirm availability before visiting.`;
-    return message;
-}
-
-/**
- * Fetch products from API (with caching)
- */
-async function fetchProducts(forceRefresh = false) {
-    const now = Date.now();
-
-    if (!forceRefresh && productsCache && (now - productsCacheTime < PRODUCTS_CACHE_TTL)) {
-        return productsCache;
-    }
-
-    try {
-        const response = await axios.get(PRODUCT_API_URL, { timeout: 10000 });
-        if (response.data && response.data.products) {
-            productsCache = response.data.products;
-            productsCacheTime = now;
-            return productsCache;
-        }
-        return productsCache || [];
-    } catch (err) {
-        console.error(`❌ Failed to fetch products: ${err.message}`);
-        return productsCache || [];
-    }
-}
-
-/**
- * Fetch stores for a product (with caching)
- */
-async function fetchStoresForProduct(productSlug, forceRefresh = false) {
-    const now = Date.now();
-    const cacheKey = productSlug;
-
-    // Check cache
-    if (!forceRefresh && storeCache.has(cacheKey)) {
-        const cached = storeCache.get(cacheKey);
-        if (now - cached.time < STORE_CACHE_TTL) {
-            console.log(`������ [STORE LOCATOR] Using cached stores for ${productSlug}`);
-            return cached.data;
-        }
-    }
-
-    try {
-        const url = `${STORE_API_BASE}/stores?product=${encodeURIComponent(productSlug)}`;
-        const response = await axios.get(url, { timeout: 10000 });
-
-        if (response.data && response.data.stores) {
-            storeCache.set(cacheKey, { data: response.data.stores, time: now });
-            console.log(`������ [STORE LOCATOR] Cached ${response.data.stores.length} stores for ${productSlug}`);
-            return response.data.stores;
-        }
-        return [];
-    } catch (err) {
-        console.error(`❌ Failed to fetch stores for ${productSlug}: ${err.message}`);
-        // Return cache if exists (even expired)
-        if (storeCache.has(cacheKey)) {
-            return storeCache.get(cacheKey).data;
-        }
-        return [];
-    }
-}
-
-/**
- * Main function: Find and return store information
- * @param {string} userMessage - The user's message
- * @param {string} apiKey - API key
- * @param {boolean} hasProductContext - If true, user already mentioned a product (e.g., "Where can I buy X in Y")
- */
-async function findStores(userMessage, apiKey, hasProductContext = false) {
-    console.log(`������ [STORE LOCATOR] Analyzing: "${userMessage}"`);
-
-    // Check for pending product from previous interaction
-    const now = Date.now();
-    const hasPendingProduct = pendingProductSlug && (now - pendingTimestamp < PENDING_TTL);
-
-    // Step 1: Use LLM to understand user intent
-    const intent = await analyzeUserIntent(userMessage, apiKey);
-    console.log(`������ [STORE LOCATOR] Intent:`, intent);
-
-    // Check if this is a location-only response (user just sent location)
-    const isLocationOnly = !intent.productSlug && intent.location && hasPendingProduct;
-
-    if (isLocationOnly) {
-        console.log(`������ [STORE LOCATOR] Using pending product: ${pendingProductSlug}`);
-        // Use the pending product with this location
-        intent.productSlug = pendingProductSlug;
-        intent.needsLocation = false;
-        intent.intent = 'find_stores';
-    }
-
-    // Store pending product if we have one (for next message)
-    // Keep it even after successful search - user might want to change location
-    if (intent.productSlug && (intent.needsLocation || intent.location)) {
-        pendingProductSlug = intent.productSlug;
-        pendingTimestamp = now;
-        console.log(`������ [STORE LOCATOR] Stored pending product: ${pendingProductSlug}`);
-    }
-
-    // Step 2: If needs location but none provided, ask for it
-    if (intent.needsLocation && !intent.location) {
-        return {
-            needsLocation: true,
-            text: `To find stores, please share your location/area.\n\nExample responses:\n- "in Singapore"\n- "near Subang Jaya"\n- "I'm in Shah Alam"\n- "Selangor area"`,
-            productSlug: intent.productSlug
-        };
-    }
-
-    // Step 2.5: Check if location is too broad (big country/region)
-    // If user says "Malaysia" or "KL" without specific area, ask for more specific area
-    // This applies even when user mentioned a product (e.g., "Where to buy BioNatto in Malaysia")
-    if (intent.location && isBigRegion(intent.location)) {
-        console.log(`������ [STORE LOCATOR] Location "${intent.location}" is too broad, asking for specific area`);
-        return {
-            needsLocation: true,
-            text: getSpecificAreasMessage(intent.location),
-            productSlug: intent.productSlug,
-            location: intent.location
-        };
-    }
-
-    // Step 3: If no product identified, return error
-    if (!intent.productSlug) {
-        // Check if this is a follow-up location change with pending product
-        if (intent.location && hasPendingProduct) {
-            console.log(`������ [STORE LOCATOR] Using pending product: ${pendingProductSlug}`);
-            intent.productSlug = pendingProductSlug;
-            intent.needsLocation = false;
-            intent.intent = 'find_stores';
-        }
-        // Also check last mentioned product (context from earlier messages)
-        else if (!intent.productSlug && intent.location) {
-            const lastProduct = getLastMentionedProduct();
-            if (lastProduct) {
-                console.log(`������ [STORE LOCATOR] Using last mentioned product: ${lastProduct}`);
-                intent.productSlug = lastProduct;
-                intent.needsLocation = false;
-                intent.intent = 'find_stores';
-            }
-        }
-
-        // If still no product, return success with noContext message (don't fall through to TIER 1.5)
-        if (!intent.productSlug) {
-            // Try ONE MORE time - check last mentioned product again
-            const lastProduct = getLastMentionedProduct();
-            if (lastProduct) {
-                console.log(`������ [STORE LOCATOR] Using last mentioned product: ${lastProduct}`);
-                intent.productSlug = lastProduct;
-                intent.needsLocation = false;
-                intent.intent = 'find_stores';
-            } else {
-                // No context - return message but DON'T fall through to TIER 1.5
-                return {
-                    success: true,
-                    stores: [],
-                    noContext: true,
-                    text: `To help you find stores, please mention which product you're looking for.\n\nFor example: "Where can I buy Men Guard in Singapore?"\n\nOr if you mentioned a product earlier in our chat, just share your location!`
-                };
-            }
-        }
-    }
-
-    // Keep pending product for follow-up location changes (don't clear here)
-    // Only clear when: 1) timeout expires, 2) user asks unrelated, 3) user completes search
-
-    // Step 4: Fetch stores for the product
-    console.log(`������ [STORE LOCATOR] Fetching stores for: ${intent.productSlug}`);
-    const stores = await fetchStoresForProduct(intent.productSlug);
-
-    if (stores.length === 0) {
-        return {
-            success: true,
-            stores: [],
-            text: `Sorry, I couldn't find any stores selling this product.\n\nPlease try a different product or contact our support.`,
-            productSlug: intent.productSlug
-        };
-    }
-
-    console.log(`������ [STORE LOCATOR] Found ${stores.length} stores, parsing with LLM...`);
-
-    // Step 5: Parse store data with LLM
-    const parsedStores = await parseStoresWithLLM(stores, apiKey);
-
-    // Get product display name for use in messages
-    let productDisplayName = 'our products';
-    try {
-        const products = await fetchProducts();
-        const product = products.find(p => p.slug === intent.productSlug);
-        if (product) productDisplayName = product.name;
-    } catch (e) {
-        console.log(`⚠️ Could not fetch product name`);
-    }
-
-    // Step 6: Filter by location if provided
-    let filteredStores = parsedStores;
-    let noStoresInArea = false;
-    if (intent.location) {
-        const lowerLoc = intent.location.toLowerCase();
-        filteredStores = parsedStores.filter(s => {
-            const state = (s.state || '').toLowerCase();
-            const area = (s.area || '').toLowerCase();
-            const address = (s.address || '').toLowerCase();
-            return state.includes(lowerLoc) || area.includes(lowerLoc) || address.includes(lowerLoc);
-        });
-
-        if (filteredStores.length === 0) {
-            // No stores in that location - tell user instead of showing all
-            console.log(`������ [STORE LOCATOR] No stores in ${intent.location}`);
-            noStoresInArea = true;
-        } else {
-            // Store total count for "more results" message
-            console.log(`������ [STORE LOCATOR] Found ${filteredStores.length} stores in ${intent.location}`);
-        }
-    } else {
-        // No location filter - show all (will be limited to 7 in response)
-        console.log(`������ [STORE LOCATOR] Found ${parsedStores.length} total stores`);
-    }
-
-    // Handle no stores in area - return friendly message, don't fall through to TIER 1.5
-    if (noStoresInArea) {
-        return {
-            success: true,
-            stores: [],
-            noStoresInArea: true,
-            text: `Sorry, I couldn't find any ${productDisplayName} stores in ${intent.location}.\n\nOur products are currently available in major cities like Singapore, Kuala Lumpur, Penang, Johor, and other areas. Would you like to try a different location?`,
-            productSlug: intent.productSlug
-        };
-    }
-
-    // Limit to 7 stores for display
-    const displayLimit = 7;
-    const hasMoreStores = filteredStores.length > displayLimit;
-    const storesToDisplay = filteredStores.slice(0, displayLimit);
-
-    // Step 7: Generate response
-    const responseText = await generateStoreResponse(productDisplayName, storesToDisplay, intent.location, apiKey, hasMoreStores, filteredStores.length);
-
-    // Mark as just completed - keep pending product for follow-up location changes
-    justCompletedSearch = true;
-    pendingTimestamp = Date.now(); // Refresh timestamp
-
-    // Also refresh last mentioned product (staying in same conversation)
-    if (intent.productSlug) {
-        trackMentionedProduct(intent.productSlug);
-    }
-
-    return {
-        success: true,
-        stores: storesToDisplay,
-        hasMoreStores,
-        totalStores: filteredStores.length,
-        text: responseText,
-        productSlug: intent.productSlug
-    };
-}
-
-/**
- * Check if this is a store-related query using LLM with conversation context
- * Returns: { isStoreQuery: boolean, reasoning: string }
+ * Check if this is a store-related query
  */
 async function isStoreQueryWithLLM(userText, apiKey) {
-    const prompt = `You are a store locator assistant for a health products chatbot. Analyze the user message and conversation context.
+    const prompt = `You are a store locator assistant. Analyze the user message and determine if this is a store locator query.
 
-Determine if this message is a store locator query (asking about where to buy products or find retail stores).
+User message: "${userText}"
 
 Check for:
 1. Explicit store/buy keywords: "where to buy", "store", "pharmacy", "retail", "watsons", "guardian", "caring"
 2. Location changes in store conversations: "How about [location]?" or just "[location]?" after a store search
-3. Product + location patterns: "BioNatto in Singapore", "buy men guard in KL"
-4. Follow-up location changes after a store search: user previously asked about stores and is now changing location
-
-IMPORTANT CONTEXT:
-- If the user has mentioned a product recently (in this conversation) and is now mentioning a location, it might be a store query
-- "How about [location]?" often means "find stores in [location] for the product we discussed"
-- Single location words like "melaka?" or "singapore?" might be follow-up location changes
-
-User message: "${userText}"
+3. Follow-up location changes after a store search
 
 Return JSON:
-{"isStoreQuery": true/false, "reasoning": "brief explanation"}
-
-Examples:
-- "Where can I buy BioNatto?" → {"isStoreQuery": true, "reasoning": "explicit buy question"}
-- "How about melaka?" → {"isStoreQuery": true, "reasoning": "location change in store conversation"}
-- "singapore?" → {"isStoreQuery": true, "reasoning": "location follow-up"}
-- "What are the ingredients?" → {"isStoreQuery": false, "reasoning": "product info query"}`;
+{"isStoreQuery": true/false, "reasoning": "brief explanation"}`;
 
     try {
         const response = await axios.post(
@@ -792,81 +689,55 @@ Examples:
         let jsonStr = content.replace(/```json\n?|```\n?/gi, '').trim();
         const parsed = JSON.parse(jsonStr);
 
-        console.log(`������ [STORE LOCATOR] LLM isStoreQuery: ${parsed.isStoreQuery} - ${parsed.reasoning}`);
         return {
             isStoreQuery: parsed.isStoreQuery === true,
             reasoning: parsed.reasoning || ''
         };
     } catch (err) {
-        console.log(`⚠️ [STORE LOCATOR] LLM isStoreQuery failed: ${err.message}`);
-        // Fallback to keyword matching
         return { isStoreQuery: fallbackIsStoreQuery(userText), reasoning: 'fallback' };
     }
 }
 
 /**
- * Fallback keyword matching (used when LLM fails)
+ * Fallback keyword matching
  */
 function fallbackIsStoreQuery(userText) {
     const lowerText = userText.toLowerCase();
 
-    // First check for explicit store keywords
     const storeKeywords = [
         'where to buy', 'where can i buy', 'where to get', 'can i buy',
-        'store', 'stores', 'retail', 'retailer', 'pharmacy', 'watsons', 'guardian', 'caring',
-        'sell', 'selling', 'available', 'in singapore', 'in malaysia', 'in kl'
+        'store', 'stores', 'retail', 'pharmacy', 'watsons', 'guardian', 'caring',
+        'sell', 'available', 'in singapore', 'in malaysia', 'in kl'
     ];
     if (storeKeywords.some(k => lowerText.includes(k))) {
         return true;
     }
 
-    // Check for location-based patterns like "How about [location]?"
     if (lowerText.startsWith('how about ') && !lowerText.includes('?')) {
         const location = lowerText.replace('how about ', '').trim();
         const locations = [
             'singapore', 'kl', 'kuala lumpur', 'pj', 'petaling jaya', 'subang', 'subang jaya',
-            'shah alam', 'selangor', 'puchong', 'kajang', 'cheras', 'klang', 'ampang',
-            'rawang', 'seri kembangan', 'ipoh', 'penang', 'george town', 'johor', 'johor bahru', 'jb',
-            'melaka', 'malacca', 'seremban', 'sabah', 'kota kinabalu', 'kk', 'sarawak', 'kuching',
-            'langkawi', 'sg', 'changi', 'klia', 'usj', 'bandar sunway'
+            'shah alam', 'selangor', 'puchong', 'kajang', 'johor', 'jb', 'penang', 'melaka'
         ];
         return locations.some(loc => location.includes(loc));
-    }
-
-    // Also check for direct location mentions followed by "?"
-    if (lowerText.endsWith('?') && !lowerText.includes(' ')) {
-        const loc = lowerText.replace('?', '').trim();
-        const singleWordLocations = [
-            'singapore', 'kl', 'subang', 'shah', 'alam', 'pj', 'johor', 'penang',
-            'melaka', 'ipoh', 'malacca', 'seremban', 'sabah', 'sarawak', 'langkawi',
-            'klang', 'cheras', 'kajang', 'puchong', 'rawang', 'ampang', 'usj'
-        ];
-        return singleWordLocations.includes(loc);
     }
 
     return false;
 }
 
 /**
- * Check if this is a store-related query (quick check - synchronous fallback)
- * Note: Use isStoreQueryWithLLM for full LLM-based detection with context
+ * Check if this is a store-related query (quick check)
  */
 function isStoreQuery(userText) {
-    // Quick synchronous check for high-traffic scenarios
-    // For full LLM-based detection, use isStoreQueryWithLLM in the main flow
     return fallbackIsStoreQuery(userText);
 }
 
 /**
- * Clear pending product state (call when user asks something unrelated)
+ * Clear pending product state
  */
 function clearPendingProduct() {
     pendingProductSlug = null;
     pendingTimestamp = 0;
-    justCompletedSearch = false;
-    // Note: We don't clear lastMentionedProductSlug here intentionally
-    // - let it expire naturally after 3 minutes
-    // - This allows "Where to buy?" -> "Singapore" to still use last mentioned product
 }
 
 module.exports = {

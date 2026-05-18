@@ -1,11 +1,13 @@
 // services/knowledgeLoader.js
+// Loads and caches the knowledge base from files
+
 const fs = require('fs');
 const path = require('path');
 
 const MAIN_KB_FILE = path.join(__dirname, '..', 'config', 'knowledgeBase.json');
 const PRODUCTS_DIR = path.join(__dirname, '..', 'config', 'products');
 
-let cachedKnowledge = null;          // merged { products, general, guidelines }
+let cachedKnowledge = null;
 let mainFileMtime = 0;
 let productsDirMtime = 0;
 let watcher = null;
@@ -37,7 +39,7 @@ function loadProductsFromDir(dirPath) {
                 products[data.name] = data;
             }
         } catch (err) {
-            console.error(`Error loading product file ${file}:`, err.message);
+            console.error(`[KB] Error loading product file ${file}:`, err.message);
         }
     }
     return products;
@@ -52,13 +54,11 @@ function loadKnowledge() {
         if (Object.keys(dirProducts).length > 0) {
             products = dirProducts;
         } else if (mainData.products) {
-            products = mainData.products;      // backward compatibility
+            products = mainData.products;
         }
 
-        // Handle guidelines as either string or object
         let guidelines = mainData.guidelines;
         if (typeof guidelines === 'string') {
-            // Convert legacy string to object with a single 'general' key
             guidelines = { general: guidelines };
         }
 
@@ -71,10 +71,10 @@ function loadKnowledge() {
         mainFileMtime = fileMtime(MAIN_KB_FILE);
         productsDirMtime = dirMtime(PRODUCTS_DIR);
 
-        console.log(`✅ Knowledge base reloaded at ${new Date().toLocaleTimeString()} (${Object.keys(products).length} products)`);
+        console.log(`[KB] Knowledge base loaded (${Object.keys(products).length} products)`);
         return cachedKnowledge;
     } catch (err) {
-        console.error('Failed to load knowledge base:', err.message);
+        console.error('[KB] Failed to load knowledge base:', err.message);
         return cachedKnowledge || { products: {}, general: {}, guidelines: {} };
     }
 }
@@ -92,20 +92,20 @@ function startWatcher() {
     if (watcher) return;
     try {
         watcher = fs.watch(MAIN_KB_FILE, () => {
-            console.log('🔄 knowledgeBase.json changed – reloading...');
+            console.log('[KB] knowledgeBase.json changed - reloading...');
             mainFileMtime = 0;
         });
         if (fs.existsSync(PRODUCTS_DIR)) {
             fs.watch(PRODUCTS_DIR, (eventType, filename) => {
                 if (filename && filename.endsWith('.json')) {
-                    console.log(`🔄 Product file ${filename} changed – reloading...`);
+                    console.log(`[KB] Product file ${filename} changed - reloading...`);
                     productsDirMtime = 0;
                 }
             });
         }
-        console.log('👀 Watching knowledge base files for changes...');
+        console.log('[KB] Watching knowledge base files for changes...');
     } catch (err) {
-        console.warn('File watcher could not be set up:', err.message);
+        console.warn('[KB] File watcher could not be set up:', err.message);
     }
 }
 startWatcher();
